@@ -1,0 +1,26 @@
+# DeepSeek-V4-Flash MoE config (E=256, H=4096, I=256, topk=6, as in the traces here),
+# num_tokens over the powers of two 1..32768.
+fused_marlin_moe_w4a16_mxfp4: &shapes
+  shapes:
+    - [1, 256, 4096, 256, 6]
+    - [2, 256, 4096, 256, 6]
+    - [4, 256, 4096, 256, 6]
+    - [8, 256, 4096, 256, 6]
+    - [16, 256, 4096, 256, 6]
+    - [32, 256, 4096, 256, 6]
+    - [64, 256, 4096, 256, 6]
+    - [128, 256, 4096, 256, 6]
+    - [256, 256, 4096, 256, 6]
+    - [512, 256, 4096, 256, 6]
+    - [1024, 256, 4096, 256, 6]
+    - [2048, 256, 4096, 256, 6]
+    - [4096, 256, 4096, 256, 6]
+    - [8192, 256, 4096, 256, 6]
+    - [16384, 256, 4096, 256, 6]
+    - [32768, 256, 4096, 256, 6]
+  shape_desc: "num_tokens, num_experts, hidden_size, intermediate_size, topk"
+
+# The same shapes for the other marlin quantization schemes (both repos use these op_names).
+fused_marlin_moe_w4a16_int4: *shapes
+fused_marlin_moe_w8a16_int8: *shapes
+fused_marlin_moe_w8a16_fp8: *shapes

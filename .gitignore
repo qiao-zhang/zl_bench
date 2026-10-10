@@ -1,0 +1,6 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+runs/
+# stale keys moved out by gen_inventory.py --refresh-shapes, pending review
+*.unmatched.yaml

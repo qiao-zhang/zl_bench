@@ -1,0 +1,2582 @@
+# Maintained by gen_inventory.py --refresh-shapes.
+# Top-level keys: FlagGems op_name or Benchmark class name (upstream's
+# fallback chain); ops with neither use their base-class DEFAULT_SHAPES.
+# Keys other than the curated ones come from upstream core_shapes.yaml (one shape kept).
+AttentionBenchmark:
+  shapes:
+  - [4, 32, 2048, 128]
+Benchmark:
+  shapes:
+  - [4096, 4096]
+BlasBenchmark:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 1024, 1024, 1024]
+ChunkGatedDeltaRuleBenchmark:
+  shape_desc: B, T, Hg, H, K, V
+  shapes:
+  - [1, 256, 4, 8, 64, 64]
+ConcatAndCacheMLABenchmark:
+  shapes:
+  - [64, 8, 21, 8, 4]
+ConcatBenchmark:
+  shape_desc: ((B), M, N) * 3
+  shapes:
+  - [512, 512]
+Conv1DBenchmark:
+  shape_desc: N, C, L, Co, K, stride, padding, groups
+  shapes:
+  - [16, 16, 1024, 32, 7, 1, 3, 1]
+Conv2DBenchmark:
+  shape_desc: N, C_in, H, W, C_out, K_h, K_w, stride, padding, groups
+  shapes:
+  - [64, 32, 18, 18, 32, 5, 5, 2, 1, 1]
+Conv3DBenchmark:
+  shape_desc: N, C_in, D, H, W, C_out, K_d, K_h, K_w, stride, padding, groups
+  shapes:
+  - [16, 32, 24, 24, 24, 24, 3, 3, 3, 1, 1, 2]
+ConvDepthwise2DBenchmark:
+  shape_desc: N, C, H, W, K_h, K_w, stride, padding, dilation
+  shapes:
+  - [8, 128, 56, 56, 5, 5, 1, 2, 1]
+EmbeddingBenchmark:
+  shapes:
+  - [128, 128]
+FlashMLABenchmark:
+  shapes:
+  - [4096]
+ForeachOpsBenchmark:
+  shape_desc: M, N (per tensor, list of 16)
+  shapes:
+  - [1024, 1024]
+ForeachUnaryBenchmark:
+  shape_desc: M, N (per tensor, list of 16)
+  shapes:
+  - [1024, 1024]
+ForeachUnaryListLengthBenchmark:
+  shape_desc: N (per tensor, list of 1/16/128)
+  shapes:
+  - [65536]
+FractionalMaxPool2dBenchmark:
+  shape_desc: N, C, H, W
+  shapes:
+  - [32, 128, 28, 28]
+FusedRecurrentGatedDeltaRuleBenchmark:
+  shape_desc: (T,) many lengths
+  shapes:
+  - [184]
+GenericBenchmark2DOnly:
+  shapes:
+  - [1024, 1024]
+GenericBenchmark4DOnly:
+  shapes:
+  - [1024, 1024, 4, 8]
+GenericBenchmarkExcluse1D:
+  shapes:
+  - [4096, 4096]
+GenericBenchmarkExcluse3D:
+  shapes:
+  - [1024, 512]
+IndexPutAccFalseBenchmark:
+  shapes:
+  - - [1024, 1024]
+    - - [4, 64]
+    - [1024]
+    - false
+IndexPutAccTrueBenchmark:
+  shapes:
+  - - [1024, 1024]
+    - - [64]
+      - [64]
+    - [64]
+    - false
+IndexReduceBenchmark:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+IntMMBenchmark:
+  shape_desc: M, N, K
+  shapes:
+  - [256, 2048, 2048]
+KronBenchmark:
+  shapes:
+  - [128, 128]
+MoeAlignBlockSizeBenchmark:
+  shapes:
+  - [32, 16]
+MvAndOuterBenchmark:
+  shapes:
+  - [4096, 4096]
+NormBenchmark:
+  shape_desc: N, C, *
+  shapes:
+  - [16, 16, 8, 88]
+PerTokenGroupQuantFp8Benchmark:
+  shapes:
+  - [83, 512, 64]
+RWKVBenchmark:
+  shapes:
+  - [1024]
+RWKVSparsityBenchmark:
+  shapes:
+  - [1]
+ReshapeAndCacheBenchmark:
+  shapes:
+  - [42, 8, 80, 16, 10000]
+ReshapeAndCacheFlashBenchmark:
+  shapes:
+  - [21, 4, 80, 16, 10000]
+RopeBenchmark:
+  shapes:
+  - [256]
+ScaledDotProductFusedAttentionOverrideableBenchmark:
+  shape_desc: B, H, S, D
+  shapes:
+  - [2, 8, 128, 128]
+TensorRepeatBenchmark:
+  shape_desc: (B), M, N
+  shapes:
+  - [512, 512]
+TensorSelectBenchmark:
+  shapes:
+  - [1024, 1024]
+UnaryPointwiseBenchmark:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+UnaryReductionBenchmark:
+  shapes:
+  - [4096, 4096]
+UpsampleBenchmark:
+  shape_desc: N, C, H, W
+  shapes:
+  - [2, 3, 1024, 1024]
+_ctc_loss:
+  shape_desc: T, N, C, S
+  shapes:
+  - [512, 32, 64, 48]
+_ctc_loss_backward:
+  shape_desc: T, N, C, S
+  shapes:
+  - [512, 32, 64, 48]
+_ctc_loss_backward_out:
+  shape_desc: T, N, C, S
+  shapes:
+  - [512, 32, 64, 48]
+_ctc_loss_out:
+  shape_desc: T, N, C, S
+  shapes:
+  - [512, 32, 64, 48]
+_weight_norm:
+  shapes:
+  - [1024, 1024]
+abs:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+abs_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+absolute:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+acos:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+act_quant_triton:
+  shape_desc: M, N
+  shapes:
+  - [1, 128]
+adaptive_max_pool3d:
+  shape_desc: '[input_shape, output_size]'
+  shapes:
+  - - [4, 32, 16, 32, 32]
+    - [8, 16, 16]
+add_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+add_rms_norm:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+addcdiv:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+addcdiv_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+addcmul:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+addcmul_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+addmm:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 2048, 2048, 2048]
+addmm_dtype:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 2048, 2048, 2048]
+addmm_dtype_out:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 2048, 2048, 2048]
+addmm_out:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 2048, 2048, 2048]
+addmm_out_vector_bias:
+  shape_desc: B, M, N, K
+  shapes:
+  - [1, 256, 256, 1024]
+addmm_vector_bias:
+  shape_desc: B, M, N, K
+  shapes:
+  - [1, 256, 256, 1024]
+addmv:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+addr:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 1024, 1024, 1024]
+alias_copy:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+alias_copy_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+all:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+all_dim:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+allclose:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+amax:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+aminmax:
+  shape_desc: M, N
+  shapes:
+  - [1048576]
+angle:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+any:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+any_dim:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+any_dims:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+apply_repetition_penalties:
+  shape_desc: M, N
+  shapes:
+  - [64, 32000]
+apply_rotary_pos_emb:
+  shape_desc: M, N
+  shapes:
+  - [512]
+arange:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+arange_start:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+arange_start_step:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+arcsinh:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+arcsinh_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+arcsinh_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+arctanh_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+argmax:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+argmin:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+argsort:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+as_strided_copy:
+  shape_desc: input shape, size, stride, storage_offset
+  shapes:
+  - - [64, 64]
+    - [64, 64]
+    - [64, 1]
+    - 0
+as_strided_copy_out:
+  shape_desc: input shape, size, stride, storage_offset
+  shapes:
+  - - [64, 64]
+    - [64, 64]
+    - [64, 1]
+    - 0
+asinh:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+asinh_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+assert_async:
+  shape_desc: M, N
+  shapes:
+  - []
+atan:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+atan2:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+atan2_out:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+atan_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+atanh:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 64]
+avg_pool2d:
+  shape_desc: N, C, H, W
+  shapes:
+  - [32, 128, 28, 28]
+avg_pool2d_backward:
+  shape_desc: N, C, H, W
+  shapes:
+  - [32, 128, 28, 28]
+avg_pool3d:
+  shape_desc: N, C, D, H, W
+  shapes:
+  - [8, 64, 8, 28, 28]
+baddbmm:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 1024, 1024, 1024]
+batch_norm:
+  shape_desc: N, C, *
+  shapes:
+  - [20, 6, 65536]
+batch_norm_backward:
+  shape_desc: N, C, *
+  shapes:
+  - [20, 6, 65536]
+bernoulli_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bincount:
+  shape_desc: M, N
+  shapes:
+  - [10000, 1]
+bincount_weighted:
+  shape_desc: M, N
+  shapes:
+  - [10000, 1]
+bitwise_and_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_and_scalar_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_and_scalar_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_and_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_and_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_left_shift:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_not:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+bitwise_not_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+bitwise_or_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_or_scalar_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_or_scalar_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_or_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_or_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bitwise_right_shift:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+bmm:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 1024, 1024, 1024]
+bmm_out:
+  shape_desc: B, M, N, K
+  shapes:
+  - [16, 1024, 1024, 1024]
+cat_out:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+cauchy:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+cauchy_:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+cdist_backward:
+  shape_desc: batch, n1, dim
+  shapes:
+  - [8, 64, 128]
+ceil:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+ceil_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+ceil_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+celu:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+celu_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+chunk_gated_delta_rule_fwd:
+  shape_desc: B, T, H, K, V
+  shapes:
+  - [4, 4096, 64, 128, 128]
+chunk_gdn2:
+  shapes:
+  - [1, 2048, 8, 64, 64]
+clamp:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+clamp_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+clamp_max:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+clamp_max_:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+clamp_min:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+clamp_min_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+clamp_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+clamp_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+clip:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+clip_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+col2im:
+  shape_desc: M, N
+  shapes:
+  - - 4
+    - 32
+    - [3, 3]
+    - [32, 32]
+    - [1, 1]
+    - [1, 1]
+    - [1, 1]
+combine_topk_swa_indices:
+  shape_desc: M, N
+  shapes:
+  - - [3, 2]
+    - [6, 4]
+    - [4, 3]
+    - 4
+    - 4
+    - 2
+    - 20
+    - 8
+compute_global_topk_indices_and_lens:
+  shape_desc: M, N
+  shapes:
+  - [5, 4, 2, 4, 64]
+compute_linear_combination:
+  shape_desc: M, N, K
+  shapes: &id001
+  - [256, 512, 1024]
+compute_linear_combination_out:
+  shape_desc: M, N, K
+  shapes: *id001
+concat_and_cache_mla:
+  shape_desc: M, N
+  shapes:
+  - [16, 8, 84, 32, 4]
+concatenate:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+conj_physical:
+  shape_desc: M, N
+  shapes:
+  - [2048, 2048]
+constant_pad_nd:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+contiguous:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+conv1d:
+  shape_desc: N, C, L, Co, K, stride, padding, groups
+  shapes:
+  - [64, 32, 512, 32, 5, 2, 2, 1]
+conv1d_padding:
+  shape_desc: batch, input_c, input_l, out_c, kernel, stride, padding, groups
+  shapes:
+  - [64, 48, 1024, 128, 5, 2, 2, 1]
+conv2d:
+  shape_desc: N, C_in, H, W, C_out, K_h, K_w, stride, padding, groups
+  shapes:
+  - [104, 16, 32, 32, 32, 4, 4, 1, 0, 1]
+conv2d_padding:
+  shape_desc: batch, input_c, input_h, input_w, out_c, kernel_h, kernel_w, stride,
+    padding, groups
+  shapes:
+  - [32, 64, 128, 128, 32, 3, 3, 1, same, 1]
+conv3d:
+  shape_desc: N, C_in, D, H, W, C_out, K_d, K_h, K_w, stride, padding, groups
+  shapes:
+  - [16, 32, 24, 24, 24, 24, 3, 3, 3, 1, 1, 2]
+conv3d_padding:
+  shape_desc: batch, input_c, input_d, input_h, input_w, out_c, kernel_d, kernel_h,
+    kernel_w, stride, padding, groups
+  shapes:
+  - [32, 8, 8, 8, 8, 32, 3, 3, 3, 1, valid, 1]
+conv_depthwise2d:
+  shape_desc: N, C, H, W, K_h, K_w, stride, padding, dilation
+  shapes:
+  - [32, 32, 64, 64, 3, 3, 1, 1, 1]
+conv_transpose1d:
+  shape_desc: batch, input_c, input_l, out_c, kernel, stride, padding, groups
+  shapes:
+  - [64, 48, 256, 128, 5, 2, 2, 1]
+conv_transpose2d:
+  shape_desc: N, C_in, H, W, C_out, K_h, K_w, stride, padding, groups
+  shapes:
+  - [16, 32, 32, 32, 64, 3, 3, 2, 1, 1]
+copy:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+copy_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+copysign:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+copysign_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+cos:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+cos_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+cosh:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+cosh_:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+cosh_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+count_nonzero:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+cp_gather_indexer_k_quant_cache:
+  shape_desc: batch_size, seq_len, block_size, head_dim, quant_block_size
+  shapes:
+  - [32, 1024, 16, 512, 128]
+cross_attention:
+  shape_desc: B, H, Q_LEN, HEAD_DIM, KV_LEN
+  shapes:
+  - [4, 8, 2048, 64, 256]
+cross_attention_mask:
+  shape_desc: B, H, Q_LEN, HEAD_DIM, KV_LEN
+  shapes:
+  - [4, 8, 2048, 64, 256]
+cross_entropy_loss:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+ctc_loss:
+  shape_desc: T, N, C, S
+  shapes:
+  - [256, 16, 64, 48]
+ctc_loss_backward:
+  shape_desc: T, N, C, S
+  shapes:
+  - [512, 32, 64, 48]
+cudnn_convolution:
+  shape_desc: batch, input_c, input_h, input_w, out_c, kernel_h, kernel_w, stride,
+    padding, groups
+  shapes:
+  - [16, 32, 12, 12, 24, 3, 3, 2, 1, 1]
+cudnn_rnn:
+  shape_desc: seq, batch, input, hidden, layers, bidir, mode, batch_first
+  shapes:
+  - [16, 4, 128, 128, 1, 0, 0, 0]
+cummax:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+cummin:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+cumprod:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+cumprod_:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+cumsum:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+cutlass_scaled_mm:
+  shape_desc: M, N, K
+  shapes:
+  - [16, 24576, 4096]
+dequantize_and_gather_k_cache:
+  shape_desc: M, N
+  shapes:
+  - [1, 512, 128, 512, 448, 64]
+dgeglu:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+diag:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+diag_embed:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+diagonal_backward:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+diff:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+digamma_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+div_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+div_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+dot:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+dreglu:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+dropout:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+dswiglu:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+dunder_or_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+dunder_or_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+einsum:
+  shape_desc: B, M, N, K
+  shapes:
+  - [1, 1024, 1024, 1024]
+elu:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+elu_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+elu_backward:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+embedding:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+embedding_backward:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+embedding_dense_backward:
+  shape_desc: M, N
+  shapes:
+  - [8, 4096, 256, 32768]
+eq:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+eq_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+erf:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+erf_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+exp:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+exp2:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+exp2_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+exp_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+exp_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+expm1:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+expm1_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+expm1_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+exponential:
+  shape_desc: input shape
+  shapes:
+  - [100, 1, 100]
+exponential_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+eye:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+eye_m:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+feature_dropout:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+feature_dropout_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fft:
+  shape_desc: M, N
+  shapes:
+  - [4096, 512]
+fill_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fill_scalar_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fill_scalar_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fill_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fill_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fill_tensor_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+flash_mla:
+  shape_desc: M, N
+  shapes:
+  - [1024]
+flash_mla_sparse_fwd:
+  shape_desc: s_q, s_kv, topk, h_q, d_qk
+  shapes:
+  - [4096, 8192, 2048, 128, 576]
+flip:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+float_power_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+floor:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 64]
+floor_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+floor_divide_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+floor_divide_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+floor_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 64]
+fmin:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fmin_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fmod_:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+fmod_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fmod_scalar_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fmod_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fmod_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fp8_einsum:
+  shape_desc: M, N
+  shapes:
+  - [128, 16, 7168, 1024]
+fp8_paged_mqa_logits_gems_vs_deepgemm:
+  shape_desc: batch_size, next_n, heads, head_dim, avg_kv
+  shapes:
+  - [1, 1, 16, 64, 1024]
+full:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+full_like:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+functional_sym_constrain_range_for_size:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fused_add_rms_norm:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert:
+  shape_desc: num_tokens, num_heads, num_tokens_insert, block_size, max_pos, eps
+  shapes:
+  - [2048, 128, 2048, 64, 4096, 1.0e-06]
+fused_experts_impl:
+  shape_desc: num_tokens, num_experts, hidden_size, intermediate_size, topk
+  shapes:
+  - [1, 8, 4096, 14336, 2]
+fused_inv_rope_fp8_quant:
+  shape_desc: num_tokens, num_heads, n_groups, tma_aligned_scales
+  shapes:
+  - [1024, 128, 8, true]
+fused_marlin_moe_w4a16_int4:
+  shape_desc: num_tokens, num_experts, hidden_size, intermediate_size, topk
+  shapes:
+  - [1, 8, 4096, 14336, 2]
+fused_marlin_moe_w4a16_mxfp4:
+  shape_desc: num_tokens, num_experts, hidden_size, intermediate_size, topk
+  shapes:
+  - [1, 8, 4096, 14336, 2]
+fused_marlin_moe_w8a16_fp8:
+  shape_desc: num_tokens, num_experts, hidden_size, intermediate_size, topk
+  shapes:
+  - [1, 8, 4096, 14336, 2]
+fused_marlin_moe_w8a16_int8:
+  shape_desc: num_tokens, num_experts, hidden_size, intermediate_size, topk
+  shapes:
+  - [1, 8, 4096, 14336, 2]
+fused_moe:
+  shape_desc: M, N
+  shapes:
+  - [1, 8, 4096, 14336, 2]
+fused_moe_int8_w8a16_gems_vs_bf16_deq:
+  shape_desc: M, N
+  shapes:
+  - [1, 8, 4096, 14336, 2]
+fused_q_kv_rmsnorm:
+  shape_desc: M, N
+  shapes:
+  - [1, 1536, 512]
+gather:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+gather_backward:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+gcd:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 256, 256]
+gcd_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+ge:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+ge_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+geglu:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+gelu_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+gelu_and_mul:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+gelu_backward:
+  shapes:
+  - [4096, 4096]
+glu:
+  shape_desc: M, N
+  shapes:
+  - [4, 8, 2048, 128]
+glu_backward:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+greater:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+greater_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+greater_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+greater_scalar_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+grid_sample:
+  shape_desc: M, N
+  shapes:
+  - [4, 64, 64, 64]
+group_norm:
+  shape_desc: N, C, *
+  shapes:
+  - [20, 6, 65536]
+grouped_mm:
+  shape_desc: Groups, N, K
+  shapes:
+  - [64, 2048, 128]
+grouped_topk:
+  shape_desc: M, N
+  shapes:
+  - [1024, 64, 8, 2, 8]
+groupmm:
+  shape_desc: Groups, N, K
+  shapes:
+  - [64, 2048, 128]
+gt:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+gt_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+hadamard_transform:
+  shape_desc: batch, dim
+  shapes:
+  - [64, 64]
+hadamard_transform_mn:
+  shape_desc: batch, dim
+  shapes:
+  - [1024, 40960]
+hardsigmoid:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+hardswish_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+hc_head_fused_kernel:
+  shape_desc: N, hidden_size
+  shapes:
+  - [4096, 4096, 4]
+hc_split_sinkhorn_forward:
+  shape_desc: batch, seqlen
+  shapes:
+  - [256, 256, 4]
+histc:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+hstack:
+  shapes:
+  - [4096, 4096]
+huber_loss:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+hypot:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+hypot_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+i0:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+i0_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+i0_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+index:
+  shape_desc: M, N
+  shapes:
+  - - [268435456]
+    - - [65536]
+index_add:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+index_add_:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+index_copy:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+index_copy_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+index_put:
+  shape_desc: input_shape, [index_tensor_shapes], values_shape, accumulate
+  shapes:
+  - - [268435456]
+    - - [65536]
+    - [65536]
+    - false
+index_put_:
+  shape_desc: input_shape, [index_tensor_shapes], values_shape, accumulate
+  shapes:
+  - - [268435456]
+    - - [65536]
+    - [65536]
+    - false
+index_put_impl_:
+  shape_desc: input_shape, [index_tensor_shapes], values_shape, accumulate
+  shapes:
+  - - [268435456]
+    - - [65536]
+    - [65536]
+    - false
+index_select:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+index_select_backward:
+  shape_desc: N, M
+  shapes:
+  - [64, 256]
+indexer_k_quant_and_cache:
+  shape_desc: num_tokens, num_blocks, block_size, head_dim, quant_block_size
+  shapes:
+  - [2048, 256, 16, 512, 128]
+inplace_fused_experts:
+  shape_desc: M, N
+  shapes:
+  - [16, 8, 4096, 14336, 2]
+instance_norm:
+  shape_desc: N, C, *
+  shapes:
+  - [20, 6, 65536]
+ior_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+ior_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+is_all_true:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+isclose:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+isfinite:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+isin:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+isin_scalar_tensor:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+isin_tensor_scalar:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+isinf:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+isnan:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+isneginf:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+kron:
+  shape_desc: M, N
+  shapes:
+  - [256, 256]
+layer_norm:
+  shape_desc: N, C, *
+  shapes:
+  - [20, 6, 65536]
+layer_norm_backward:
+  shape_desc: N, C, *
+  shapes:
+  - [20, 6, 65536]
+le:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+le_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+leaky_relu:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+leaky_relu_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+lerp_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+lerp_scalar_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+lerp_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+lerp_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+lift_fresh_copy:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+linalg_matrix_norm:
+  shape_desc: (*B), M, N
+  shapes:
+  - [4, 32, 64]
+linalg_matrix_norm_out:
+  shape_desc: (*B), M, N
+  shapes:
+  - [4, 32, 64]
+linalg_qr:
+  shape_desc: (*B), M, N
+  shapes:
+  - [256, 256]
+linalg_qr_out:
+  shape_desc: (*B), M, N
+  shapes:
+  - [256, 256]
+linspace:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+log:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+log10:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+log10_:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+log10_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+log1p:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 64]
+log1p_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+log_sigmoid:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+log_softmax:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+log_softmax_backward_data:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+log_softmax_backward_data_out:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+log_softmax_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logaddexp:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logaddexp_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logical_and:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logical_and_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logical_not:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+logical_or:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logical_or_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logical_xor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logit:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+logit_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+logspace:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+logsumexp:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+lt:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+lt_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+margin_ranking_loss:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+masked_fill:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+masked_fill_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+masked_fill_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+masked_fill_scalar_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+masked_scatter:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+masked_scatter_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+masked_select:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+max:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+max_dim:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+max_pool2d_backward:
+  shape_desc: N, C, H, W
+  shapes:
+  - [32, 128, 28, 28]
+max_pool2d_with_indices:
+  shape_desc: N, C, H, W
+  shapes:
+  - [32, 128, 28, 28]
+max_pool3d:
+  shape_desc: N, C, D, H, W
+  shapes:
+  - [4, 3, 16, 56, 56]
+max_pool3d_backward:
+  shape_desc: N, C, D, H, W
+  shapes:
+  - [4, 3, 16, 56, 56]
+maximum:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+mean:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+mean_dim:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+median:
+  shape_desc: input shape
+  shapes:
+  - [4096]
+median_dim:
+  shape_desc: input shape or [input shape, dim, keepdim]
+  shapes:
+  - - [32, 384, 128]
+    - 1
+    - false
+median_dim_values:
+  shape_desc: input shape or [input shape, dim, keepdim]
+  shapes:
+  - [768, 1536]
+median_out:
+  shape_desc: input shape
+  shapes:
+  - [65]
+mhc_bwd:
+  shape_desc: seqlen, n_stream
+  shapes:
+  - [65536, 4]
+mhc_post:
+  shape_desc: N, H
+  shapes:
+  - [4096, 7168]
+mhc_pre:
+  shape_desc: N, hidden_size
+  shapes:
+  - [8192, 2560]
+min:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+min_dim:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+minimum:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+mm:
+  shape_desc: B, M, N, K
+  shapes:
+  - [2, 384, 384, 384]
+mm_out:
+  shape_desc: B, M, N, K
+  shapes:
+  - [2, 384, 384, 384]
+mm_self_transpose:
+  shape_desc: M, K
+  shapes:
+  - [1024, 1024]
+moe_align_block_size_triton:
+  shape_desc: M, N
+  shapes:
+  - [512, 64, 16384, 10]
+moe_sum:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+mse_loss:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+mul:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+mul_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+multilabel_margin_loss_forward:
+  shape_desc: N, C
+  shapes:
+  - [16, 512]
+multinomial:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+mv:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+nan_to_num:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+nanmedian:
+  shape_desc: N or M, N
+  shapes:
+  - [1024, 1024]
+nanmedian_dim:
+  shape_desc: M, N
+  shapes:
+  - [256, 4096]
+nanmedian_dim_values:
+  shape_desc: M, N
+  shapes:
+  - [256, 4096]
+nanmedian_out:
+  shape_desc: N or M, N
+  shapes:
+  - [1024, 1024]
+native_dropout_backward:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+ne:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+ne_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+neg:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+neg_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+new_full:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+nll_loss2d_backward:
+  shape_desc: M, N
+  shapes:
+  - [256, 256, 4, 8]
+nll_loss2d_forward:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024, 4, 8]
+nll_loss_backward:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+nll_loss_forward:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+nll_loss_nd_backward:
+  shape_desc: N, C, d1, d2, ...
+  shapes:
+  - [64, 64]
+nll_loss_nd_forward:
+  shape_desc: N, C, d1, d2, ...
+  shapes:
+  - [32, 128, 512]
+nonzero:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+nonzero_numpy:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+normal_float_float_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+normal_float_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+normal_tensor_float:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+normal_tensor_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+one_hot:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+ones:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+ones_like:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+outer:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+pack_seq_triton:
+  shape_desc: N, D, B, lengths
+  shapes:
+  - - 512
+    - 64
+    - 5
+    - [64, 128, 64, 128, 128]
+pad:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+per_token_group_quant_fp8:
+  shape_desc: M, N
+  shapes:
+  - [7, 4096, 256]
+pixel_shuffle:
+  shape_desc: N, C, H, W, upscale_factor
+  shapes:
+  - [4, 64, 32, 32, 2]
+pixel_unshuffle:
+  shape_desc: M, N
+  shapes:
+  - - [4, 16, 64, 48]
+    - 4
+poisson:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+polar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+pow_tensor_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+pow_tensor_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+prelu:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+prod:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+quantile:
+  shape_desc: M, N
+  shapes:
+  - [1048576]
+rad2deg:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 64]
+rad2deg_:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 64]
+rand:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+rand_like:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+randint:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+randint_like:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+randn:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+randn_like:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+randperm:
+  shape_desc: M
+  shapes:
+  - [65536]
+reciprocal:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+reciprocal_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+reflection_pad1d:
+  shape_desc: M, N
+  shapes:
+  - - [8, 16, 256]
+    - [8, 8]
+reflection_pad1d_backward:
+  shape_desc: M, N
+  shapes:
+  - [2, 3]
+reflection_pad1d_out:
+  shape_desc: M, N
+  shapes:
+  - - [8, 16, 256]
+    - [8, 8]
+reflection_pad2d:
+  shape_desc: M, N
+  shapes:
+  - - [16, 32, 64, 128]
+    - [1, 1, 1, 1]
+reflection_pad2d_out:
+  shape_desc: M, N
+  shapes:
+  - - [16, 32, 64, 128]
+    - [1, 1, 1, 1]
+reglu:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+relu:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+relu6:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+relu_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+remainder:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+remainder_scalar_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+remainder_scalar_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+remainder_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+remainder_tensor_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+renorm:
+  shape_desc: M, N
+  shapes:
+  - [4, 8]
+repeat:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+repeat_interleave_self_int:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+repeat_interleave_self_tensor:
+  shape_desc: M, N, K
+  shapes:
+  - [64, 64, 64, 64]
+repeat_interleave_tensor:
+  shape_desc: M, N, K
+  shapes:
+  - [64, 64, 64, 64]
+replication_pad1d:
+  shape_desc: M, N
+  shapes:
+  - - [8, 32, 256]
+    - [1, 2]
+replication_pad3d:
+  shape_desc: M, N
+  shapes:
+  - [2, 32, 16, 128, 128]
+reshape_and_cache:
+  shape_desc: M, N
+  shapes:
+  - [42, 8, 80, 16, 10000]
+reshape_and_cache_flash:
+  shape_desc: M, N
+  shapes:
+  - [42, 8, 80, 16, 10000]
+resolve_conj:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+resolve_neg:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+rms_norm:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+roll:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+rot90:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+round:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+round_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+round_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+router_gemm:
+  shape_desc: M, N, K
+  shapes:
+  - [1024, 8, 4096]
+rrelu_with_noise_backward:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+rsqrt:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+rsqrt_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+rsub_scalar:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+rsub_tensor:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+rwkv_ka_fusion:
+  shape_desc: M, N
+  shapes:
+  - [32768]
+rwkv_mm_sparsity:
+  shape_desc: M, N
+  shapes:
+  - [1]
+safe_softmax:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+scaled_dot_product_attention:
+  shape_desc: M, N
+  shapes:
+  - [4, 32, 1024, 64]
+scaled_softmax_backward:
+  shape_desc: batch, heads, query_len, key_len
+  shapes:
+  - [2, 8, 128, 128]
+scaled_softmax_forward:
+  shape_desc: batch, heads, query_len, key_len
+  shapes:
+  - [2, 8, 128, 128]
+scatter_add_:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+scatter_reduce_two:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+scatter_reduce_two_:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+scatter_reduce_two_out:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+scatter_src:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+scatter_src_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+searchsorted:
+  shape_desc: sorted_sequence shape, values shape, sorter, right, out_int32
+  shapes:
+  - - [1024]
+    - [4096]
+    - false
+    - false
+    - false
+searchsorted_out:
+  shape_desc: sorted_sequence shape, values shape, sorter, right, out_int32
+  shapes:
+  - - [1024]
+    - [4096]
+    - false
+    - false
+    - false
+searchsorted_scalar:
+  shape_desc: sorted_sequence shape, right, out_int32
+  shapes:
+  - - [1024]
+    - false
+    - false
+searchsorted_scalar_out:
+  shape_desc: sorted_sequence shape, right, out_int32
+  shapes:
+  - - [1024]
+    - false
+    - false
+segment_reduce:
+  shape_desc: data shape
+  shapes:
+  - &id002 [4096, 4096]
+segment_reduce_backward:
+  shape_desc: data shape
+  shapes:
+  - *id002
+segment_reduce_backward_out:
+  shape_desc: data shape
+  shapes:
+  - *id002
+segment_reduce_out:
+  shape_desc: data shape
+  shapes:
+  - *id002
+select_backward:
+  shape_desc: M, N
+  shapes:
+  - [128, 256]
+select_scatter:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+selu:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+selu_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sgn_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sigmoid:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sigmoid_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sigmoid_backward:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+signbit:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+silu:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+silu_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+silu_and_mul:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+silu_and_mul_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+silu_and_mul_with_clamp:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+silu_and_mul_with_clamp_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+silu_backward:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sin:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sin_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+single_dim_shapes:
+  shape_desc: M
+  shapes:
+  - [2048]
+sinh_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+skip_layer_norm:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+slice_backward:
+  shape_desc: M, N
+  shapes:
+  - [128, 256]
+slice_scatter:
+  shape_desc: M, N
+  shapes:
+  - [1024, 65536]
+smooth_l1_loss:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+smooth_l1_loss_backward:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+soft_margin_loss:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+softmax:
+  shape_desc: M, N
+  shapes:
+  - [1048576]
+softmax_backward:
+  shapes:
+  - [4096, 4096]
+softmax_backward_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+softmax_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+softplus:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+softshrink:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+softshrink_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sort:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+sort_stable:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+sparse_attention:
+  shape_desc: B, M, KV_LEN, TOPK, H, D
+  shapes:
+  - [16, 1, 136, 136, 8, 512]
+sparse_sampled_addmm:
+  shape_desc: B, M, N, K
+  shapes:
+  - [8, 512, 512, 512]
+sparse_sampled_addmm_out:
+  shape_desc: B, M, N, K
+  shapes:
+  - [8, 512, 512, 512]
+special_i0e:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+special_i0e_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+special_i1:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+special_i1_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+split_with_sizes_copy:
+  shape_desc: M, N
+  shapes:
+  - [10, 4]
+sqrt:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+sqrt_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+square:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+square_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+square_out:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+stack:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+std:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+sub:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+sub_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+sum:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+sum_dim:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+sum_dim_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+sum_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+svd:
+  shape_desc: (*B), M, N
+  shapes:
+  - [4096, 8, 8]
+swiglu:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+t_copy:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+t_copy_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+tan:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+tan_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+tanh:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+tanh_:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+tanh_backward:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+tensor_split:
+  shape_desc: M, N
+  shapes:
+  - [64, 64]
+threshold:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+threshold_backward:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+tile:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+top_k_per_row_decode:
+  shape_desc: vocab_size, top_k
+  shapes:
+  - [32768, 512]
+top_k_per_row_prefill:
+  shape_desc: num_rows, vocab_size, top_k
+  shapes:
+  - [1, 129280, 1024]
+topk:
+  shape_desc: M, N
+  shapes:
+  - [128, 32768, 256]
+topk_softmax:
+  shape_desc: M, N
+  shapes:
+  - [8192, 128, 8]
+topk_softplus_sqrt:
+  shape_desc: num_tokens, num_experts, topk
+  shapes:
+  - [4096, 256, 6]
+topk_w8a16_fp8:
+  shape_desc: M, N, K
+  shapes:
+  - [128, 1024, 16]
+tril:
+  shape_desc: (B), M, N
+  shapes:
+  - [4096, 4096]
+tril_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+tril_extreme_diagonal:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+tril_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+tril_out_sliced:
+  shape_desc: (B), M, N
+  shapes:
+  - [512, 32, 32]
+tril_out_transposed:
+  shape_desc: (B), M, N
+  shapes:
+  - [512, 32, 32]
+triu:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+triu_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+trunc:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+trunc_:
+  shape_desc: (B), M, N
+  shapes:
+  - [1024, 65536]
+trunc_divide:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+trunc_divide_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+unfold_backward:
+  shape_desc: M, N
+  shapes:
+  - - [32, 64]
+    - 1
+    - 16
+    - 16
+uniform_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+unique2:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+unique_consecutive:
+  shape_desc: M, N
+  shapes:
+  - [1024, 1024]
+unpack_seq_triton:
+  shape_desc: N, D, B, lengths
+  shapes:
+  - - 512
+    - 64
+    - 5
+    - [64, 128, 64, 128, 128]
+unsafe_index:
+  shapes:
+  - - [32, 32]
+    - - [8]
+      - [2, 8]
+upsample_bicubic2d_aa:
+  shape_desc: N, C, H, W
+  shapes:
+  - [8, 16, 128, 128]
+upsample_bicubic2d_aa_backward:
+  shape_desc: N, C, input_h, input_w, output_h, output_w, align_corners
+  shapes:
+  - [4, 64, 64, 64, 32, 32, false]
+upsample_linear1d:
+  shape_desc: N, C, H, W
+  shapes:
+  - [8, 16, 128, 128]
+upsample_nearest1d:
+  shape_desc: N, C, H, W
+  shapes:
+  - [16, 16, 512, 512]
+upsample_nearest2d:
+  shape_desc: N, C, H, W
+  shapes:
+  - [16, 16, 512, 512]
+upsample_nearest3d:
+  shape_desc: N, C, H, W
+  shapes:
+  - [16, 16, 512, 512]
+upsample_nearest_exact1d:
+  shape_desc: M, N
+  shapes:
+  - [16, 32, 512]
+upsample_trilinear3d:
+  shape_desc: N, C, H, W
+  shapes:
+  - [1, 3, 512, 512]
+var:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+var_correction:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+var_mean:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+vdot:
+  shape_desc: M
+  shapes:
+  - [65536]
+vector_norm:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+view_copy:
+  shape_desc: (B), M, N
+  shapes:
+  - [64, 64]
+vstack:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+w8a8_block_fp8_matmul:
+  shape_desc: M, N, K
+  shapes:
+  - [64, 4096, 7168]
+w8a8_block_fp8_matmul_deepgemm:
+  shape_desc: M, N, K
+  shapes:
+  - [64, 4096, 7168]
+weight_norm:
+  shape_desc: M, N
+  shapes:
+  - [64, 512, 512]
+weight_norm_interface:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+where_self:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+where_self_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+zero:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+zero_:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+zero_out:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+zeros:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
+zeros_like:
+  shape_desc: M, N
+  shapes:
+  - [4096, 4096]
