@@ -20,6 +20,16 @@ a BENCHMARK_DIRECT_NO_CUDAGRAPH marker into the log. Captures run under a
 scratch CUDA RNG state (_capture_with_scratch_rng); an aborted capture is
 released (_release_memory) and followed by one untimed call
 (_absorb_aborted_capture) before the fallback.
+
+Accelerators whose torch backend presents itself as cuda but implements only
+part of the CUDA graph API (the T-Head PPU) still go through this path: every
+measurement tries the graph first, and the optional helpers — sync-debug mode,
+graphsafe RNG state, the RNG generator list — are skipped when missing instead
+of failing the measurement. When the graph mechanism itself is absent (no
+torch.cuda.CUDAGraph, or capture reported unsupported) graph timing is turned
+off for the rest of that pytest process, i.e. for this op: its remaining shapes
+go straight to do_bench. The next op runs in a fresh process and tries again, so
+ops that can be captured keep their graph timing.
 """
 
 from __future__ import annotations
@@ -37,6 +47,47 @@ _MAX_CALLS_ENV = "GRAPH_MAX_CALLS"
 DEFAULT_MAX_CALLS = 1000
 MIN_SAFE_CALLS = 250  # smaller graphs read 1 us kernels too fast (graph_plan)
 N_SAMPLES = 10  # graph replays per measurement, as in do_bench_cudagraph
+# torch.cuda API the graph path needs; a backend that lacks one (the PPU
+# compatibility layer implements most, but not necessarily all of it) never
+# gets a capture attempt.
+_GRAPH_APIS = ("CUDAGraph", "graph", "Stream", "Event", "synchronize", "current_stream", "stream",
+               "current_device", "empty_cache")
+_GRAPH_UNSUPPORTED = ""  # set once the mechanism itself is missing (graph_missing_api /
+                         # _graph_mechanism_error); empty = try graphs
+_unsupported_reported = False
+
+
+def _missing_graph_api(torch_module) -> str:
+    """First torch.cuda API graph timing needs that this backend lacks, else ""."""
+    cuda = getattr(torch_module, "cuda", None)
+    if cuda is None:
+        return "torch.cuda"
+    return next((f"torch.cuda.{name}" for name in _GRAPH_APIS if not hasattr(cuda, name)), "")
+
+
+def graph_missing_api() -> str:
+    """_missing_graph_api for the torch that is installed; "" when a capture can be tried."""
+    try:
+        import torch
+    except Exception as exc:
+        return f"import torch: {type(exc).__name__}: {exc}"
+    return _missing_graph_api(torch)
+
+
+def _graph_mechanism_error(exc: Exception) -> str:
+    """Reason when exc means graph timing cannot work on this platform at all, else "".
+
+    A single op that cannot be captured (host sync, OOM, a kernel the graph
+    rejects) must not disable graph timing for the ops after it, so only a
+    missing Python API or an explicit "graphs/capture not supported" counts as
+    the mechanism being absent."""
+    if isinstance(exc, (AttributeError, NotImplementedError)):
+        return f"{type(exc).__name__}: {exc}"
+    msg = str(exc).lower()
+    absent = ("not supported", "unsupported", "not implemented", "unavailable")
+    if any(m in msg for m in absent) and any(c in msg for c in ("graph", "captur")):
+        return " ".join(str(exc).split())[:160]
+    return ""
 
 
 def max_calls_per_graph() -> int:
@@ -160,12 +211,19 @@ def _capture_with_scratch_rng(call):
     can only land on the discarded scratch state, and _seed_plugin determinism
     is left untouched."""
     import torch
-    dev = torch.cuda.current_device()
-    gen = torch.cuda.default_generators[dev]
-    saved = gen.graphsafe_get_state()
-    scratch = torch.Generator(device="cuda")
-    scratch.manual_seed(gen.initial_seed())
-    gen.graphsafe_set_state(scratch)
+    gens = getattr(torch.cuda, "default_generators", None)
+    if gens is None:
+        return call()  # backend exposes no default generators: capture without a scratch state
+    gen = gens[torch.cuda.current_device()]
+    if not (hasattr(gen, "graphsafe_get_state") and hasattr(gen, "graphsafe_set_state")):
+        return call()  # no graph-aware RNG state here: the real state takes part
+    try:
+        saved = gen.graphsafe_get_state()
+        scratch = torch.Generator(device="cuda")
+        scratch.manual_seed(gen.initial_seed())
+        gen.graphsafe_set_state(scratch)
+    except Exception:
+        return call()  # scratch state unusable here: capture with the real state
     try:
         return call()
     finally:
@@ -190,10 +248,19 @@ def _find_host_sync(run):
     A host sync (tensor.item(), nonzero, a device-to-host copy) is illegal
     during capture, so such a call can only be timed with plain do_bench.
     Detecting it up front with torch's sync debug mode avoids an aborted
-    capture and the memory it would strand."""
+    capture and the memory it would strand. Where the backend has no usable
+    sync-debug mode (the PPU layer may not implement it), skip the probe and
+    let the capture itself decide."""
     import torch
-    mode = torch.cuda.get_sync_debug_mode()
-    torch.cuda.set_sync_debug_mode("error")
+    get_mode = getattr(torch.cuda, "get_sync_debug_mode", None)
+    set_mode = getattr(torch.cuda, "set_sync_debug_mode", None)
+    if get_mode is None or set_mode is None:
+        return None
+    try:
+        mode = get_mode()
+        set_mode("error")
+    except Exception:
+        return None  # present but unusable here: not a reason to give up the graph
     try:
         run()
     except RuntimeError as exc:
@@ -201,7 +268,10 @@ def _find_host_sync(run):
             raise
         return " ".join(str(exc).split())
     finally:
-        torch.cuda.set_sync_debug_mode(mode)
+        try:
+            set_mode(mode)
+        except Exception:
+            pass
     torch.cuda.synchronize()
     return None
 
@@ -241,10 +311,13 @@ def _graph_bench(fn, rep, grad_to_none, quantiles, return_mode):
         torch.cuda.synchronize()
         n_calls, replays = graph_plan(start.elapsed_time(end) / 5, rep, max_calls_per_graph())
         graph = None
+        oom = getattr(torch, "OutOfMemoryError", None)
         try:
             graph = capture(n_calls)
-        except torch.OutOfMemoryError:
-            pass  # retried below, once the failed graph is no longer referenced
+        except Exception as exc:
+            if oom is None or not isinstance(exc, oom):
+                raise
+            # retried below, once the failed graph is no longer referenced
         if graph is None:
             _release_memory()
             op = os.environ.get("FLAGGEMS_PERF_CURRENT_OP", "<unknown>")
@@ -284,11 +357,32 @@ def _absorb_aborted_capture(fn):
             raise
 
 
+def _report_direct(op: str, phase: str, failure) -> None:
+    """One BENCHMARK_DIRECT_NO_CUDAGRAPH marker, the same shape as before PPU support."""
+    from _term_style import YELLOW, paint
+    print(
+        paint(f"BENCHMARK_DIRECT_NO_CUDAGRAPH op={op} phase={phase} "
+              f"reason={failure[0]} detail={failure[1]!r}", YELLOW),
+        flush=True,
+    )
+
+
 def _patched_do_bench(fn, warmup=25, rep=100, grad_to_none=None,
                       quantiles=None, return_mode="mean"):
     """Drop-in replacement for triton.testing.do_bench using CUDA-graph timing."""
+    global _GRAPH_UNSUPPORTED, _unsupported_reported
     op = os.environ.get("FLAGGEMS_PERF_CURRENT_OP", "<unknown>")
     fn = _timing_scope.timed(fn)  # its launches are the measurement's (_ir_dump_plugin)
+    # A backend without the graph API (or one that already rejected a capture in
+    # this process) goes straight to do_bench: the capture could not work, and
+    # every shape would pay for finding that out.
+    missing = _GRAPH_UNSUPPORTED or graph_missing_api()
+    if missing:
+        if not _unsupported_reported:
+            _unsupported_reported = True
+            _report_direct(op, "capability", ("GraphUnsupported", missing))
+        return _ORIGINAL_DO_BENCH(fn, warmup=warmup, rep=rep, grad_to_none=grad_to_none,
+                                  quantiles=quantiles, return_mode=return_mode)
     phase = "sync"  # which step rejected the graph, for the fallback marker
     failure = None
     try:
@@ -314,13 +408,13 @@ def _patched_do_bench(fn, warmup=25, rep=100, grad_to_none=None,
         if _is_fatal_cuda_error(exc):
             raise
         failure = (type(exc).__name__, " ".join(str(exc).split())[:160])
+        mechanism = _graph_mechanism_error(exc)
+        if mechanism:
+            # Not this kernel's fault: the platform cannot do graphs. Skip the
+            # remaining shapes of this op; the next op is a fresh process.
+            _GRAPH_UNSUPPORTED = mechanism
     # Out of the except block, so the failed graph is unreferenced and can be freed.
-    from _term_style import YELLOW, paint
-    print(
-        paint(f"BENCHMARK_DIRECT_NO_CUDAGRAPH op={op} phase={phase} "
-              f"reason={failure[0]} detail={failure[1]!r}", YELLOW),
-        flush=True,
-    )
+    _report_direct(op, phase, failure)
     if phase == "capture":
         _release_memory()
         _absorb_aborted_capture(fn)
@@ -338,8 +432,10 @@ def pytest_configure(config):
     _timing_scope.enabled = True
     cap = max_calls_per_graph()
     print(f"{tag('[cudagraph-plugin]')} triton.testing.do_bench → CUDA-graph timing "
-          f"({f'at most {cap} calls per graph' if cap > 0 else 'no cap on calls per graph'})",
-          file=sys.stderr, flush=True)
+          f"({f'at most {cap} calls per graph' if cap > 0 else 'no cap on calls per graph'}); "
+          "a call that cannot be captured falls back to do_bench with a "
+          "BENCHMARK_DIRECT_NO_CUDAGRAPH marker (skipped for the rest of the op when the "
+          "platform has no graph support)", file=sys.stderr, flush=True)
     if 0 < cap < MIN_SAFE_CALLS:
         print(f"{tag('[cudagraph-plugin]')} warning: {_MAX_CALLS_ENV}={cap} is below "
               f"{MIN_SAFE_CALLS}; graphs that small read sub-microsecond kernels too fast",

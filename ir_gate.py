@@ -14,13 +14,17 @@ selects, one to two orders of magnitude faster than a blind full run.
   python ir_gate.py runs/batch_x --base $PWD/python --new $PWD/python \\
       --base-env FLAGTREE_XXX=0 --new-env FLAGTREE_XXX=1
 
-Each variant is compiled down to cubin on both sides (--stage cubin, the default).
-A variant is unchanged only if its cubin and the launch metadata Triton derives
-(shared memory, warps, ...) are identical: then the measured kernel is the same
-binary. TTGIR alone is not enough: a reordering, or a change in a later stage,
-leaves the TTGIR ops intact but changes the code ptxas emits. Line info is turned
-off on both sides (TRITON_DISABLE_LINE_INFO=1, unless an --*-env sets it), so a
-moved source location alone does not count as a change; it does not change the code.
+Each variant is compiled down to the backend's binary stage on both sides (--stage
+binary, the default: cubin on NVIDIA, hgbin on the PPU backend). A variant is
+unchanged only if that binary and the launch metadata Triton derives (shared
+memory, warps, ...) are identical: then the measured kernel is the same binary.
+TTGIR alone is not enough: a reordering, or a change in a later stage, leaves the
+TTGIR ops intact but changes the code the backend's assembler emits. The stage
+chain is read from the backend itself (backend.add_stages), never hardcoded, so a
+run recorded on PPU compares hgbin and a run recorded on NVIDIA compares cubin.
+Line info is turned off on both sides (TRITON_DISABLE_LINE_INFO=1, unless an
+--*-env sets it), so a moved source location alone does not count as a change; it
+does not change the code.
 
 --stage ttgir stops after make_ttgir (faster, for a first look); without --base the
 TTGIR recorded at run time is the baseline, so only --stage ttgir is possible and
@@ -60,6 +64,9 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 from run_batch import parse_env
 
 LOG = "[ir-gate]"
+# NVIDIA's stage chain, used only for digests written before a run recorded its
+# backend's own chain (and for --stage ttgir, where the recorded ttgir is the
+# baseline). New digests carry "stages" and "binary"; see _compile_one.
 STAGES = ("ttgir", "llir", "ptx", "cubin")
 # Launch parameters Triton derives during compilation; a difference changes the launch
 # even when the code is identical.
@@ -176,8 +183,22 @@ def ttgir_digests(text: str) -> dict:
             "ops": op_counts(text)}
 
 
+def stage_chain(digest: Optional[dict]) -> List[str]:
+    """Stages a digest recorded, in compile order; NVIDIA's chain for old digests."""
+    return list((digest or {}).get("stages") or STAGES)
+
+
+def binary_stage(digest: Optional[dict]) -> str:
+    """The backend's final (binary) stage: cubin on NVIDIA, hgbin on PPU."""
+    return (digest or {}).get("binary") or STAGES[-1]
+
+
 def compare(base: Optional[dict], new: Optional[dict], stage: str) -> Tuple[str, str, str]:
-    """(changed 1/0/?, first differing stage, TTGIR verdict) of one variant."""
+    """(changed 1/0/?, first differing stage, TTGIR verdict) of one variant.
+
+    stage is "binary" (the backend's final stage) or "ttgir". Digests written
+    before the stage chain was recorded fall back to STAGES, so NVIDIA runs
+    recorded by an older zl_bench compare exactly as they did."""
     if not base or not new:
         return "?", "error", "?"
     if base["ttgir"] == new["ttgir"]:
@@ -186,9 +207,13 @@ def compare(base: Optional[dict], new: Optional[dict], stage: str) -> Tuple[str,
         ttgir = "order"
     else:
         ttgir = "changed"
-    stages = STAGES[:STAGES.index(stage) + 1]
+    binary = binary_stage(new)
+    target = binary if stage == "binary" else stage
+    stages = stage_chain(new)
+    if target in stages:
+        stages = stages[:stages.index(target) + 1]
     first = next((s for s in stages if base.get(s) != new.get(s)), "")
-    if not first and stage == "cubin" and base.get("meta") != new.get("meta"):
+    if not first and target == binary and base.get("meta") != new.get("meta"):
         first = "meta"
     return ("1" if first else "0"), first or "-", ttgir
 
@@ -221,11 +246,24 @@ def _compile_one(ttir_path: str, dest: str, stage: str) -> Optional[str]:
         src = IRSource(str(ttir), context, backend)
         stages: dict = {}
         backend.add_stages(stages, options, src.language)
+        # The backend decides its own chain: NVIDIA has ttir/ttgir/llir/ptx/cubin,
+        # the PPU backend ttir/ttgir/llir/hgbin. Compile and compare up to the
+        # backend's final stage, so a PPU run gates on hgbin instead of failing on
+        # a missing "ptx" stage.
+        names = list(stages)
+        binary = names[-1] if names else ""
+        stop = binary if stage == "binary" else stage
+        if "ttgir" not in names or stop not in names:
+            return (f"--stage {stop!r} is not in this backend's chain {names} "
+                    f"(its binary stage is {binary!r})")
+        if names.index(stop) < names.index("ttgir"):
+            return f"--stage {stop!r} stops before ttgir; nothing to compare"
+        chain = names[names.index("ttgir"):names.index(stop) + 1]
         module = backend.make_ir(src, options, backend.get_codegen_implementation(options),
                                  backend.get_module_map(), context)
         md = {"hash": meta.get("hash", "x"), "target": target, **options.__dict__}
-        out: dict = {}
-        for name in STAGES[:STAGES.index(stage) + 1]:
+        out: dict = {"stages": chain, "binary": binary}
+        for name in chain:
             module = stages[name](module, md)
             if name == "ttgir":
                 text = str(module)
@@ -303,8 +341,10 @@ def main() -> None:
                         "the baseline (--stage ttgir only)")
     p.add_argument("--new-env", action="append", default=[], metavar="K=V")
     p.add_argument("--base-env", action="append", default=[], metavar="K=V")
-    p.add_argument("--stage", choices=("cubin", "ttgir"), default="cubin",
-                   help="last stage to compile and compare (default %(default)s)")
+    p.add_argument("--stage", default="binary",
+                   help="last stage to compile and compare (default %(default)s): 'binary' is "
+                        "the backend's final stage (cubin on NVIDIA, hgbin on the PPU backend), "
+                        "'ttgir' stops after make_ttgir, or name a stage of the backend")
     p.add_argument("--out", type=Path, default=None, help="output dir (default runs/ir_gate_<timestamp>)")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 16)
     args = p.parse_args()
@@ -331,12 +371,15 @@ def main() -> None:
     # ---- per variant
     status: Dict[str, Tuple[str, str, str]] = {}
     lines = []
+    binary_names: Set[str] = set()
     for v in items:
         new = _load_digest(_dest(out, "new", v))
         if args.base:
             base = _load_digest(_dest(out, "base", v))
         else:
             base = ttgir_digests(v.recorded.read_text()) if v.recorded and v.recorded.is_file() else None
+        if new:
+            binary_names.add(binary_stage(new))
         changed, first, ttgir = compare(base, new, stage)
         h = v.ttir.parent.name
         status[h] = (changed, first, ttgir)
@@ -388,7 +431,7 @@ def main() -> None:
     if flags["1"]:
         print(f"{LOG}   first difference at: "
               + ", ".join(f"{k} {n}" for k, n in sorted(firsts.items(), key=lambda kv: -kv[1])))
-        if stage == "cubin":
+        if stage == "binary" or stage in binary_names:
             print(f"{LOG}   changed with identical TTGIR {hidden}, with only reordered TTGIR {order}")
     if row_lines:
         print(f"{LOG} rows: changed {row_counts['1']}, unchanged {row_counts['0']}, "

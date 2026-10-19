@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 import _cudagraph_plugin as cg
@@ -55,3 +57,40 @@ def test_timing_scope():
     finally:
         ts.enabled = False
     assert ts.in_measurement()
+
+
+_GRAPH_API_NAMES = ("CUDAGraph", "graph", "Stream", "Event", "synchronize",
+                    "current_stream", "stream", "current_device", "empty_cache")
+
+
+def test_missing_graph_api_spots_a_partial_cuda_backend():
+    full = SimpleNamespace(cuda=SimpleNamespace(**{n: object() for n in _GRAPH_API_NAMES}))
+    assert cg._missing_graph_api(full) == ""
+    assert cg._missing_graph_api(SimpleNamespace(cuda=None)) == "torch.cuda"
+    partial = SimpleNamespace(cuda=SimpleNamespace(CUDAGraph=object(), graph=object()))
+    assert cg._missing_graph_api(partial) == "torch.cuda.Stream"
+
+
+def test_graph_mechanism_error_covers_the_platform_not_one_kernel():
+    assert cg._graph_mechanism_error(AttributeError("no CUDAGraph"))
+    assert cg._graph_mechanism_error(NotImplementedError("CUDA graphs"))
+    assert cg._graph_mechanism_error(RuntimeError("stream capture is not supported here"))
+    # A kernel that cannot be captured (or an unsupported dtype) must not disable
+    # graph timing for the ops after it.
+    assert not cg._graph_mechanism_error(
+        RuntimeError("operation not permitted when stream is capturing"))
+    assert not cg._graph_mechanism_error(RuntimeError("bf16 is not supported by this op"))
+
+
+def test_platform_without_the_graph_api_calls_do_bench_directly(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(cg, "graph_missing_api", lambda: "torch.cuda.CUDAGraph")
+    monkeypatch.setattr(cg, "_GRAPH_UNSUPPORTED", "")
+    monkeypatch.setattr(cg, "_unsupported_reported", False)
+    monkeypatch.setattr(cg, "_ORIGINAL_DO_BENCH", lambda fn, **kw: calls.append(kw) or 1.0)
+    assert cg._patched_do_bench(lambda: None, warmup=1, rep=2) == 1.0
+    assert cg._patched_do_bench(lambda: None, warmup=1, rep=2) == 1.0
+    assert len(calls) == 2  # the fallback still runs, once per shape
+    out = capsys.readouterr().out
+    assert out.count("BENCHMARK_DIRECT_NO_CUDAGRAPH") == 1  # marker printed once per op
+    assert "phase=capability" in out

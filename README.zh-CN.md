@@ -58,10 +58,12 @@ zl_bench 会 monkeypatch 上游内部实现，可用性与测试时的上游版�
 
 ## 环境要求
 
-- NVIDIA GPU（在 H20 / Hopper 上开发和测试）
+- NVIDIA GPU（在 H20 / Hopper 上开发和测试）或平头哥 PPU（真武 810E）；PPU 由 FlagTree 的 `ppu` 后端和 FlagGems 的 `thead` vendor 支持，对 PyTorch 而言仍是 `torch.cuda` 接口
 - Python 3.10+ 与 PyTorch
 - FlagTree 构建的 Triton 3.6（插件用到 `knobs.compilation.listener` 和 kernel launch 钩子）
 - FlagGems 和/或 FlagGems-vllm 的源码
+
+在 PPU 上，卡号与空闲检查改用 `ppu-smi`（`ZL_BENCH_SMI` 可覆盖，两者都没有时批次按单卡处理，除非显式给 `--gpus`）。编译 diff gate 比较后端最终的二进制阶段：PPU 是 `hgbin`，NVIDIA 是 `cubin`。CUDA graph 计时仍然逐次测量尝试：捕获不了的算子回退到 `do_bench`，日志里留 `BENCHMARK_DIRECT_NO_CUDAGRAPH` 标记；平台完全没有 graph 接口时，该算子余下的 shape 直接跳过尝试。算子清单和 `ops/dismiss.txt` 是在 NVIDIA 上生成的，PPU 机器上要用 `gen_inventory.py` 重建。
 
 ## 安装
 
@@ -85,7 +87,7 @@ pip install -e FlagGems-vllm --no-deps
 
 ## 快速开始
 
-先用 `nvidia-smi` 确认 GPU 空闲，再测一个算子：
+先用 `nvidia-smi`（PPU 上是 `ppu-smi`）确认 GPU 空闲，再测一个算子：
 
 ```bash
 cd zl_bench
@@ -218,7 +220,7 @@ python run_batch.py --ops-file my_ops.txt --env FLAGTREE_XXX=1
 - 指定 `--dtypes` 时，算子不支持该 dtype 就去掉限制重跑（`dtype_fallback`）；其他失败且没有任何 SUCCESS 行时，再不加限制跑最后一次（`dtype_rescue`）。
 - 运行时 skipif 和 xfail 都算 SKIP。只有 PASS 和 SKIP 会标记为完成，供 `--resume` 复用。
 - `ops_status.csv` 每个算子一行（状态、耗时、行数、备注），边跑边更新；`summary.csv` 每个结果行一行，`batch_summary.py` 可为旧批次重新生成。备注列统计 `no_cudagraph_rows` 与 `replay_fallback`，解读结果时先看这一列。
-- 算子开始前，它的卡必须空闲：`nvidia-smi` 里没有进程，且已用显存不到 1 GiB（其他容器的进程不会列出）。同卡上的其他进程会同时干扰计时和调优，所以批次会等待（`--busy-gpu wait`，默认；`warn` 照常测量并在备注里记 `gpu_busy`）。卡号与 `nvidia-smi` 一致（`CUDA_DEVICE_ORDER=PCI_BUS_ID`）。
+- 算子开始前，它的卡必须空闲：设备管理工具（`nvidia-smi`，PPU 上是 `ppu-smi`）里没有进程，且已用显存不到 1 GiB（其他容器的进程不会列出）。同卡上的其他进程会同时干扰计时和调优，所以批次会等待（`--busy-gpu wait`，默认；`warn` 照常测量并在备注里记 `gpu_busy`）。卡号与该工具一致（`CUDA_DEVICE_ORDER=PCI_BUS_ID`）。
 - 批量数字只用于筛查：多张卡同时跑会通过功耗和散热互相影响。可疑算子用[重复测量 A/B](#重复测量-ab) 确认。
 
 **全量参考**（[测试版本](#测试版本)，7×H20，`--dtypes bfloat16`，单 shape 集）：`--all` 选出 1608 个算子，约 2.5 小时，每算子中位 12 秒（主要是进程启动与 import）。PASS 1529、SKIP 43，其余 36 个因上游或环境问题失败，已列入 `ops/dismiss.txt`。SKIP 都是上游 skipif（缺 TransformerEngine 或 vLLM 参考实现、只支持其他厂商或架构）。多 shape 集上（275 个算子，`--dtypes "bfloat16 float16"`）每个算子中位约一分钟，record 模式下最长要两小时（`chunk_gdn2`），所以要设 `--op-timeout 7200`。
@@ -337,7 +339,7 @@ runs/softmax_20260716-031752/
 
 - **latency 和别人测的差很多。**
 
-  先确认 GPU 没有被别的任务占用（`nvidia-smi`），再确认对方是否用了 CUDA graph 计时：M=1 这类小 shape 下 launch 开销占主导，普通 `do_bench` 可能高出 2 倍以上；大 shape 基本一致。
+  先确认 GPU 没有被别的任务占用（`nvidia-smi`，PPU 上是 `ppu-smi`），再确认对方是否用了 CUDA graph 计时：M=1 这类小 shape 下 launch 开销占主导，普通 `do_bench` 可能高出 2 倍以上；大 shape 基本一致。
 
 - **shape 相同、什么都没改，两次的 speedup 却不同。**
 

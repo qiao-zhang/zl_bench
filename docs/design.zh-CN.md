@@ -85,6 +85,7 @@ capture 耗时与 graph 里的调用次数成正比，而有些算子每次调�
 - **致命错误按错误原文匹配。** 非法地址、OOM、device-side assert 等直接抛出，不计时。torch 给每个 CUDA 错误都附加 "enable device-side assertions" 提示，宽泛的子串匹配会把所有 capture 失败都当成致命错误。
 - **capture 在一次性 RNG 状态下进行。** 中途失败的 capture 可能让默认 CUDA 生成器停在 capturing 状态，此后进程里任何 `torch.randn` 都会报 "Offset increment outside graph capture"。capture 期间把生成器状态换成临时状态，结束后换回，真正的生成器始终不参与 capture。
 - **capture 失败后先空跑一次。** cusolver 会把作废的 capture 留在句柄状态里，下一次调用报一次 `CUSOLVER_STATUS_EXECUTION_FAILED` 后才恢复（如 `linalg_eigvals`、`linalg_matrix_rank`）。
+- **平台缺 graph 接口时只降级一次，不按 shape 重复。** sync debug 模式、graph-safe RNG 状态和生成器列表都是可选项：缺哪个都不妨碍 capture（PPU 兼容层只实现了一部分 API）。缺少 `torch.cuda.CUDAGraph`、`Stream` 或 `Event` 的后端直接走 `do_bench`（`phase=capability`）；平台明确报“不支持 capture”时，该算子余下的 shape 不再尝试。下一个算子是新进程，会重新尝试，所以能 capture 的算子仍然用上 graph。
 
 ### 回退行的精度
 

@@ -109,3 +109,27 @@ def test_replay_dir(tmp_path):
     (tmp_path / "run.log").write_text("")
     assert run_batch.replay_dir(case, args) == tmp_path  # a single-op record
     assert run_batch.replay_dir(case, argparse.Namespace(replay_root=None)) is None
+
+
+def test_smi_tool_prefers_the_override_then_what_is_installed(monkeypatch):
+    monkeypatch.delenv("ZL_BENCH_SMI", raising=False)
+    monkeypatch.setattr(run_batch.shutil, "which",
+                        lambda tool: f"/usr/bin/{tool}" if tool == "ppu-smi" else None)
+    assert run_batch.smi_tool() == "ppu-smi"
+    monkeypatch.setenv("ZL_BENCH_SMI", "/opt/bin/my-smi")
+    assert run_batch.smi_tool() == "/opt/bin/my-smi"
+
+
+def test_visible_gpus_reads_ppu_smi(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(run_batch, "smi_tool", lambda: "ppu-smi")
+    monkeypatch.setattr(run_batch.subprocess, "run",
+                        lambda cmd, **kw: argparse.Namespace(
+                            stdout="PPU 0: T-Head Zhenwu 810E\nPPU 1: T-Head Zhenwu 810E\n"))
+    assert run_batch.visible_gpus(None) == ["0", "1"]
+
+
+def test_visible_gpus_without_a_tool_assumes_one_card(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(run_batch, "smi_tool", lambda: None)
+    assert run_batch.visible_gpus(None) == ["0"]

@@ -20,10 +20,12 @@ This layer only orchestrates:
   only, so FAIL/TIMEOUT rerun);
 - replay: --replay-root points at an earlier batch dir and passes
   REPLAY_FROM=<root>/<repo>/<op> per op, same semantics as single-op replay;
-- idle GPUs: before each op starts, nvidia-smi must show no other process on
-  its GPU (--busy-gpu wait, the default; warn or ignore to relax it), since a
-  neighbour on the same GPU skews both the timing and the autotune choices.
-  GPU numbers follow nvidia-smi (CUDA_DEVICE_ORDER=PCI_BUS_ID).
+- idle GPUs: before each op starts, the accelerator management tool
+  (nvidia-smi on NVIDIA, ppu-smi on PPU) must show no other process on its GPU
+  (--busy-gpu wait, the default; warn or ignore to relax it), since a neighbour
+  on the same GPU skews both the timing and the autotune choices. GPU numbers
+  follow that tool (CUDA_DEVICE_ORDER=PCI_BUS_ID). Without either tool the batch
+  assumes one device, so list the cards explicitly with --gpus.
 
 Outputs: <batch>/ops_status.csv (one row per op) and summary.csv (one row per
 result-table row, written by batch_summary.py).
@@ -45,6 +47,8 @@ import argparse
 import csv
 import hashlib
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -64,9 +68,16 @@ LOG = "[batch]"
 MAX_RETRIES = 2
 BUSY_POLL_S = 30
 BUSY_REPORT_S = 300
-# Memory in use that marks a GPU busy even when nvidia-smi lists no process on it
-# (processes of other containers or PID namespaces are not listed). An idle GPU
-# shows a few MiB.
+# Accelerator management tool, the source of GPU numbers and the idle check:
+# nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU (the name FlagGems' thead
+# vendor reports as device_query_cmd). ZL_BENCH_SMI overrides the choice, for a
+# box where both are installed or the tool has another name.
+SMI_ENV = "ZL_BENCH_SMI"
+SMI_TOOLS = ("nvidia-smi", "ppu-smi")
+_LIST_GPU_RE = re.compile(r"^\s*(?:GPU|PPU)\s+\d+:")
+# Memory in use that marks a GPU busy even when the management tool lists no
+# process on it (processes of other containers or PID namespaces are not
+# listed). An idle GPU shows a few MiB.
 BUSY_MEMORY_MIB = 1024
 
 STATUS_FIELDS = [
@@ -233,34 +244,53 @@ def parse_env(pairs: Optional[Sequence[str]]) -> Dict[str, str]:
 
 # ---------------- GPUs ----------------
 
+def smi_tool() -> Optional[str]:
+    """The accelerator management tool in use, or None when none is installed.
+
+    nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU; ZL_BENCH_SMI overrides."""
+    explicit = os.environ.get(SMI_ENV, "").strip()
+    if explicit:
+        return explicit
+    return next((tool for tool in SMI_TOOLS if shutil.which(tool)), None)
+
+
 def visible_gpus(arg: Optional[str]) -> List[str]:
     if arg:
         return [g.strip() for g in arg.split(",") if g.strip()]
     env = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     if env:
         return [g.strip() for g in env.split(",") if g.strip()]
-    try:
-        out = subprocess.run(["nvidia-smi", "--list-gpus"], text=True,
-                             capture_output=True, timeout=30).stdout
-        n = sum(1 for line in out.splitlines() if line.startswith("GPU "))
-        if n:
-            return [str(i) for i in range(n)]
-    except Exception:
-        pass
+    tool = smi_tool()
+    if tool:
+        try:
+            out = subprocess.run([tool, "--list-gpus"], text=True,
+                                 capture_output=True, timeout=30).stdout
+            lines = [line for line in out.splitlines() if line.strip()]
+            # `GPU 0: ...` on nvidia-smi, `PPU 0: ...` on ppu-smi; line count is
+            # the fallback for a tool that lists devices in another wording.
+            n = sum(1 for line in lines if _LIST_GPU_RE.match(line)) or len(lines)
+            if n:
+                return [str(i) for i in range(n)]
+        except Exception:
+            pass
     return ["0"]
 
 
 def _smi(args: List[str]) -> Optional[str]:
+    tool = smi_tool()
+    if tool is None:
+        return None
     try:
-        return subprocess.run(["nvidia-smi", *args], text=True, capture_output=True,
+        return subprocess.run([tool, *args], text=True, capture_output=True,
                               timeout=30, check=True).stdout
     except Exception:
         return None
 
 
 def parse_gpus(text: str) -> Dict[str, Tuple[str, int]]:
-    """`nvidia-smi --query-gpu=index,uuid,memory.used --format=csv,noheader,nounits`
-    -> {index: (uuid, MiB in use)}, also keyed by uuid."""
+    """`<tool> --query-gpu=index,uuid,memory.used --format=csv,noheader,nounits`
+    (nvidia-smi, or ppu-smi which mirrors its options) -> {index: (uuid, MiB in
+    use)}, also keyed by uuid."""
     out = {}
     for line in text.splitlines():
         parts = [x.strip() for x in line.split(",")]
@@ -271,7 +301,7 @@ def parse_gpus(text: str) -> Dict[str, Tuple[str, int]]:
 
 
 def parse_compute_apps(text: str, uuid: str) -> List[str]:
-    """Processes of `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory
+    """Processes of `<tool> --query-compute-apps=gpu_uuid,pid,process_name,used_memory
     --format=csv,noheader,nounits` that run on the GPU with this uuid."""
     out = []
     for line in text.splitlines():
@@ -282,8 +312,8 @@ def parse_compute_apps(text: str, uuid: str) -> List[str]:
 
 
 def gpu_users(gpu: str) -> Optional[List[str]]:
-    """What is using gpu (an nvidia-smi index or a GPU uuid): its processes, or the
-    memory in use when no process is listed; empty when idle, None if nvidia-smi
+    """What is using gpu (a management-tool index or a GPU uuid): its processes, or
+    the memory in use when no process is listed; empty when idle, None if the tool
     cannot tell."""
     gpus = _smi(["--query-gpu=index,uuid,memory.used", "--format=csv,noheader,nounits"])
     apps = _smi(["--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
@@ -310,8 +340,11 @@ def wait_for_idle_gpu(gpu: str, policy: str) -> str:
     if procs is None:
         if not _smi_missing_reported.is_set():
             _smi_missing_reported.set()
-            print(f"{LOG} warning: nvidia-smi cannot list GPU processes; not checking that "
-                  "GPUs are idle", flush=True)
+            tool = smi_tool()
+            reason = (f"no accelerator management tool (install nvidia-smi or ppu-smi, "
+                      f"or set {SMI_ENV})" if tool is None
+                      else f"{tool} cannot list GPU processes")
+            print(f"{LOG} warning: {reason}; not checking that GPUs are idle", flush=True)
         return ""
     if not procs:
         return ""
@@ -350,7 +383,7 @@ def _spawn(case: Case, out_dir: Path, gpu: str, args: argparse.Namespace,
     # shards across GPUs, so no per-op parallelism.
     for key in ("PARALLEL_WARMUP_GPUS", "REPLAY_FROM", "SHAPE_FILE", "DTYPES"):
         env.pop(key, None)
-    # GPU numbers as nvidia-smi shows them, which the idle check relies on.
+    # GPU numbers as the management tool shows them, which the idle check relies on.
     env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     env.update(getattr(args, "env", None) or {})
     pythonpath = getattr(args, "pythonpath", None)

@@ -93,3 +93,29 @@ def test_op_counts_and_diff():
     diff = ir_gate.op_diff({"ops": base}, {"ops": new})
     assert diff == "ttg.local_load:+2 arith.addi:-1 tt.foo.bar:+1"
     assert ir_gate.op_diff(None, {"ops": new}) == ""
+
+
+def _hgbin_digest(hgbin="b1", llir="l1", ttgir="t1", norm="n1", shared=0):
+    return {"ttgir": ttgir, "ttgir_norm": norm, "ops": {}, "llir": llir, "hgbin": hgbin,
+            "meta": {"shared": shared, "num_warps": 4},
+            "stages": ["ttgir", "llir", "hgbin"], "binary": "hgbin"}
+
+
+def test_compare_follows_the_backends_own_stage_chain():
+    """PPU records ttgir/llir/hgbin: the gate must compare hgbin, never look for ptx/cubin."""
+    base = _hgbin_digest()
+    assert ir_gate.binary_stage(base) == "hgbin"
+    assert ir_gate.stage_chain(base) == ["ttgir", "llir", "hgbin"]
+    assert ir_gate.compare(base, _hgbin_digest(), "binary") == ("0", "-", "same")
+    assert ir_gate.compare(base, _hgbin_digest(hgbin="b2"), "binary") == ("1", "hgbin", "same")
+    assert ir_gate.compare(base, _hgbin_digest(llir="l2"), "binary") == ("1", "llir", "same")
+    assert ir_gate.compare(base, _hgbin_digest(ttgir="t2"), "binary") == ("1", "ttgir", "order")
+    assert ir_gate.compare(base, _hgbin_digest(shared=1024), "binary") == ("1", "meta", "same")
+    # --stage ttgir stops before the hgbin, so a binary-only change is invisible
+    assert ir_gate.compare(base, _hgbin_digest(hgbin="b2"), "ttgir") == ("0", "-", "same")
+
+
+def test_old_digests_without_a_chain_keep_nvidias_stages():
+    base = _digest()
+    assert ir_gate.stage_chain(base) == list(ir_gate.STAGES)
+    assert ir_gate.binary_stage(base) == "cubin"
