@@ -78,12 +78,28 @@ def test_gpu_parsing():
 
 
 def test_gpu_users(monkeypatch):
-    out = {"--query-gpu=index,uuid,memory.used": SMI_GPUS}
-    monkeypatch.setattr(run_batch, "_smi", lambda args: out.get(args[0], SMI_APPS))
+    out = {"--query-ppu=index,uuid,memory.used": SMI_GPUS,
+           "--query-compute-apps=gpu_uuid,pid,process_name,used_memory": SMI_APPS}
+    monkeypatch.setattr(run_batch, "_smi", lambda args: out.get(args[0]))
     assert run_batch.gpu_users("0") == []
     assert len(run_batch.gpu_users("1")) == 2
     assert run_batch.gpu_users("2") == ["20480 MiB in use by processes not visible here"]
     assert run_batch.gpu_users("9") is None
+
+
+def test_gpu_users_falls_back_to_the_nvidia_spelling(monkeypatch):
+    out = {"--query-gpu=index,uuid,memory.used": SMI_GPUS,
+           "--query-compute-apps=gpu_uuid,pid,process_name,used_memory": SMI_APPS}
+    seen = []
+
+    def fake(args):
+        seen.append(args[0])
+        return out.get(args[0])
+
+    monkeypatch.setattr(run_batch, "_smi", fake)
+    assert run_batch.gpu_users("0") == []
+    assert seen[0] == "--query-ppu=index,uuid,memory.used"  # PPU spelling tried first
+    assert "--query-gpu=index,uuid,memory.used" in seen
 
 
 def test_wait_for_idle_gpu_policies(monkeypatch):
@@ -113,11 +129,19 @@ def test_replay_dir(tmp_path):
 
 def test_smi_tool_prefers_the_override_then_what_is_installed(monkeypatch):
     monkeypatch.delenv("ZL_BENCH_SMI", raising=False)
+    monkeypatch.delenv("PPU_SDK", raising=False)
     monkeypatch.setattr(run_batch.shutil, "which",
                         lambda tool: f"/usr/bin/{tool}" if tool == "ppu-smi" else None)
     assert run_batch.smi_tool() == "ppu-smi"
     monkeypatch.setenv("ZL_BENCH_SMI", "/opt/bin/my-smi")
     assert run_batch.smi_tool() == "/opt/bin/my-smi"
+
+
+def test_smi_tool_prefers_ppu_smi_under_the_ppu_sdk(monkeypatch):
+    monkeypatch.delenv("ZL_BENCH_SMI", raising=False)
+    monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
+    monkeypatch.setattr(run_batch.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    assert run_batch.smi_tool() == "ppu-smi"
 
 
 def test_visible_gpus_reads_ppu_smi(monkeypatch):
