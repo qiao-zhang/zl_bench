@@ -52,7 +52,7 @@ def test_collect_single_run_dir(tmp_path):
     run = _run_dir(tmp_path / "softmax_run", [("H1", "softmax_kernel", 1)])
     (item,) = ir_gate.collect([run])
     assert item.label == "softmax_run"
-    assert str(item.key) == "H1/softmax_kernel.ttgir"
+    assert item.key.as_posix() == "H1/softmax_kernel.ttgir"
 
 
 def _digest(ttgir="t1", norm="n1", cubin="c1", shared=0):

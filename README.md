@@ -225,6 +225,26 @@ python run_batch.py --ops-file my_ops.txt --env FLAGTREE_XXX=1
 
 **Reference full run** ([tested versions](#tested-versions), 7×H20, `--dtypes bfloat16`, single-shape set): `--all` selects 1608 ops and takes about 2.5 hours, 12 s per op at the median (mostly process start and imports). PASS 1529, SKIP 43; the other 36 fail for upstream or environment reasons and are listed in `ops/dismiss.txt`. Every SKIP is an upstream skipif (a missing TransformerEngine or vLLM reference, another vendor or architecture). On the multi-shape set (275 ops, `--dtypes "bfloat16 float16"`) an op takes about a minute at the median and up to two hours in record mode (`chunk_gdn2`), so give it `--op-timeout 7200`.
 
+### A fixed op list and an xlsx report
+
+When the work is a fixed list of ops (for example the rows of a hand-made comparison table), turn the table's CSV into an ops file once and pass it to every stage:
+
+```bash
+python rlc_ops.py --table ops/rlc_table.csv --out ops/rlc_ops.txt
+python run_batch.py --ops-file ops/rlc_ops.txt --env FLAGTREE_RLC_ENHANCE=0 --batch-dir runs/base
+python ir_gate.py runs/base --base "$TRITON_PYTHON" --new "$TRITON_PYTHON" \
+  --base-env FLAGTREE_RLC_ENHANCE=0 --new-env FLAGTREE_RLC_ENHANCE=1 --out runs/gate
+python ab_run.py --record runs/base --ops-file runs/gate/changed_ops.txt \
+  --a-env FLAGTREE_RLC_ENHANCE=0 --b-env FLAGTREE_RLC_ENHANCE=1 --out runs/ab
+python ab_compare.py runs/ab --gate runs/gate --csv runs/ab/rows.csv
+python rlc_report.py --csv runs/ab/rows.csv --gate runs/gate \
+  --table ops/rlc_table.csv --notes ops/rlc_notes.csv --out rlc_report.xlsx
+```
+
+`rlc_ops.py` reads the table's 算子 column: a `repo:` prefix is honoured; without one it searches both repos, runs the only match, runs both when both have it (`main` first, marked `both` in the provenance report), and writes a `# UNRESOLVED` comment plus a report row when neither has it, instead of failing the batch. `--report` (default `ops/rlc_ops_sources.csv`) records `main` / `vllm` / `both` / `missing` / `ambiguous` per line. `rlc_report.py` needs `openpyxl` (now in `requirements.txt`); `--notes` is an optional `op,note` CSV appended to the automatic notes (do_bench timing, replay fallback, identical binaries).
+
+For side B (RLC on), besides `--b-env FLAGTREE_RLC_ENHANCE=1`, note FlagTree's four sub-switches: `enable-rlc-enhance-cost-based`, `enable-rlc-enhance-backward-propagation` and `enable-rlc-enhance-small-component-solving` default to on, but `enable-rlc-enhance-store-layout-rematerialization` is explicitly disabled by the PPU backend (`enable_rlc_enhance_store_layout_remat=False` at three call sites in `third_party/ppu/backend/compiler.py`). To turn everything on, set those three to `True` and rebuild/reinstall FlagTree; otherwise side B runs with 4 of the 5 switches.
+
 ### Faster sweeps on multiple GPUs
 
 With many shapes, most of the wall time goes to the autotune sweep rather than the measurement. `PARALLEL_WARMUP_GPUS=N` runs the sweep on N GPUs and then measures serially on one GPU as usual:

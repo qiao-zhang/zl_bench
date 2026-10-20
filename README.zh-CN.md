@@ -225,6 +225,26 @@ python run_batch.py --ops-file my_ops.txt --env FLAGTREE_XXX=1
 
 **全量参考**（[测试版本](#测试版本)，7×H20，`--dtypes bfloat16`，单 shape 集）：`--all` 选出 1608 个算子，约 2.5 小时，每算子中位 12 秒（主要是进程启动与 import）。PASS 1529、SKIP 43，其余 36 个因上游或环境问题失败，已列入 `ops/dismiss.txt`。SKIP 都是上游 skipif（缺 TransformerEngine 或 vLLM 参考实现、只支持其他厂商或架构）。多 shape 集上（275 个算子，`--dtypes "bfloat16 float16"`）每个算子中位约一分钟，record 模式下最长要两小时（`chunk_gdn2`），所以要设 `--op-timeout 7200`。
 
+### 指定算子清单与 xlsx 报告
+
+当工作对象是固定的一张算子表（例如手工维护的对比表）时，把表存成 CSV，生成一次 ops 文件，后续每一步都用它：
+
+```bash
+python rlc_ops.py --table ops/rlc_table.csv --out ops/rlc_ops.txt
+python run_batch.py --ops-file ops/rlc_ops.txt --env FLAGTREE_RLC_ENHANCE=0 --batch-dir runs/base
+python ir_gate.py runs/base --base "$TRITON_PYTHON" --new "$TRITON_PYTHON" \
+  --base-env FLAGTREE_RLC_ENHANCE=0 --new-env FLAGTREE_RLC_ENHANCE=1 --out runs/gate
+python ab_run.py --record runs/base --ops-file runs/gate/changed_ops.txt \
+  --a-env FLAGTREE_RLC_ENHANCE=0 --b-env FLAGTREE_RLC_ENHANCE=1 --out runs/ab
+python ab_compare.py runs/ab --gate runs/gate --csv runs/ab/rows.csv
+python rlc_report.py --csv runs/ab/rows.csv --gate runs/gate \
+  --table ops/rlc_table.csv --notes ops/rlc_notes.csv --out rlc_report.xlsx
+```
+
+`rlc_ops.py` 读表里的“算子”列：带 `repo:` 前缀的按前缀；没有前缀的在两个仓库里都找，只有一个有就跑那个，两个都有就都跑（`main` 在前，来源报告标 `both`），两个都没有就写一行 `# UNRESOLVED` 注释并记入报告，不让整批失败。`--report`（默认 `ops/rlc_ops_sources.csv`）逐行记录 `main` / `vllm` / `both` / `missing` / `ambiguous`。`rlc_report.py` 依赖 `openpyxl`（已加入 `requirements.txt`）；`--notes` 是可选的 `op,note` CSV，会追加到自动备注（do_bench 计时、replay 回退、指令未增删）之后。
+
+B 侧（开启 RLC）除了 `--b-env FLAGTREE_RLC_ENHANCE=1`，还要注意 FlagTree 的四个子开关：`enable-rlc-enhance-cost-based`、`enable-rlc-enhance-backward-propagation`、`enable-rlc-enhance-small-component-solving` 默认都是开，`enable-rlc-enhance-store-layout-rematerialization` 在 PPU 后端被显式关掉（`third_party/ppu/backend/compiler.py` 三处 `enable_rlc_enhance_store_layout_remat=False`）。要“全开”，把这三处改成 `True` 并重新构建/安装 FlagTree；不改的话 B 侧只开了 4/5，A/B 结论对应的是“RLC + 三个子开关”。
+
 ### 多卡加速 sweep
 
 shape 多时，墙上时间主要花在 autotune sweep 而不是测量上。`PARALLEL_WARMUP_GPUS=N` 让 sweep 在 N 张卡上并行，之后照常在一张卡上串行测量：

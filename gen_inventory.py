@@ -158,7 +158,7 @@ def scan_repo(label: str, root: Path) -> Tuple[List[Dict[str, str]], Set[str]]:
             print(f"[gen] warning: cannot parse {path}, skipped: {exc}", file=sys.stderr)
             continue
         op_names_all |= _op_names_in(tree)
-        op_file = str(rel)[len("test_"):-len(".py")]
+        op_file = rel.as_posix()[len("test_"):-len(".py")]
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
