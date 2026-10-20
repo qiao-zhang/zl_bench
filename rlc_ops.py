@@ -10,9 +10,10 @@ share that label, a second line carries the inventory's `repo:op`:
     uniform_
     main:uniform_inplace       -> main:uniform_inplace@uniform
 
-A name without a prefix is looked up in both repos: when only one has it, that
-one runs; when both have it, both run (main first) and the sidecar report marks
-the pair `both`; when neither has it, the line is written as a `# UNRESOLVED`
+A name without a prefix is looked up in both repos (test function, then the
+benchmark's `op_name`, then the op_file): when only one repo has it, that one
+runs; when both have it, both run (main first) and the sidecar report marks the
+pair `both`; when neither has it, the line is written as a `# UNRESOLVED`
 comment in the ops file and recorded in the report instead of failing the run.
 
 Usage:
@@ -21,9 +22,10 @@ Usage:
   python ab_run.py --ops-file ops/rlc_ops.txt ...
 
 `--report` (default ops/rlc_ops_sources.csv) records every line as
-`main` / `vllm` / `both` / `missing` / `ambiguous`, so the provenance of each op
-is auditable. Ambiguous names (several op_files in one repo) remain an error:
-they cannot be resolved automatically.
+`main` / `vllm` / `both` / `multi` / `missing`, so the provenance of each op is
+auditable. A name that matches several tests is expanded to every match, marked
+`multi`, so the batch runs all of them; add `@op_file` (or a `repo:op` second
+line) to run just one.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ import run_batch
 LOG = "[rlc-ops]"
 OP_COLUMN = 1  # the table's second column is "算子"
 REPORT_FIELDS = ["line", "display", "repo", "op", "op_file", "status"]
+Match = Tuple[str, str]  # (inventory op, op_file)
 
 
 class Entry(NamedTuple):
@@ -102,83 +105,106 @@ def read_table(path: Path) -> List[Entry]:
     return out
 
 
-def _inventory() -> Tuple[Dict[Tuple[str, str, str], str], Dict[Tuple[str, str], List[str]]]:
+def _inventory() -> Tuple[Dict[Tuple[str, str], List[Match]],
+                          Dict[Tuple[str, str], List[Match]],
+                          Dict[Tuple[str, str], List[Match]]]:
+    """(by_op, by_op_name, by_op_file) -> [(inventory op, op_file), ...]."""
     inv = run_batch.load_inventory()
-    index: Dict[Tuple[str, str, str], str] = {}
-    by_pair: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    by_op: Dict[Tuple[str, str], List[Match]] = defaultdict(list)
+    by_name: Dict[Tuple[str, str], List[Match]] = defaultdict(list)
+    by_file: Dict[Tuple[str, str], List[Match]] = defaultdict(list)
     for label, rows in inv.items():
         for r in rows:
             if r.get("collected") == "no":
                 continue
-            index[(label, r["op"], r["op_file"])] = r["op_file"]
-            by_pair[(label, r["op"])].append(r["op_file"])
-    return index, by_pair
+            match = (r["op"], r["op_file"])
+            by_op[(label, r["op"])].append(match)
+            for name in (r.get("op_names") or "").split(";"):
+                name = name.strip()
+                if name:
+                    by_name[(label, name)].append(match)
+            by_file[(label, r["op_file"])].append(match)
+            base = r["op_file"].rsplit("/", 1)[-1]
+            if base != r["op_file"]:
+                by_file[(label, base)].append(match)
+    return by_op, by_name, by_file
+
+
+def _candidates(repo: str, name: str,
+                by_op: Dict[Tuple[str, str], List[Match]],
+                by_name: Dict[Tuple[str, str], List[Match]],
+                by_file: Dict[Tuple[str, str], List[Match]]) -> List[Match]:
+    """The table writes either the test function, the benchmark's op_name or the
+    op_file; try them in that order and stop at the first kind that matches."""
+    for table in (by_op, by_name, by_file):
+        found = sorted(set(table.get((repo, name), [])))
+        if found:
+            return found
+    return []
 
 
 def resolve(entries: List[Entry]) -> Tuple[List[str], List[dict], List[str]]:
     """(specs, report rows, errors). A name missing from both repos is reported,
-    not an error; an ambiguous name (several op_files in one repo) still is."""
-    index, by_pair = _inventory()
+    not an error; a name that matches several tests in one repo (or in both) is
+    expanded to every match, marked `multi`, so the batch runs all of them."""
+    by_op, by_name, by_file = _inventory()
     specs: List[str] = []
     report: List[dict] = []
     errors: List[str] = []
 
-    def add(entry: Entry, repo: str, op_file: str, status: str) -> None:
-        specs.append(f"{repo}:{entry.op}@{op_file}")
+    def add(entry: Entry, repo: str, match: Match, status: str) -> None:
+        op, op_file = match
+        specs.append(f"{repo}:{op}@{op_file}")
         report.append({"line": entry.line, "display": entry.display, "repo": repo,
-                       "op": entry.op, "op_file": op_file, "status": status})
+                       "op": op, "op_file": op_file, "status": status})
+
+    def expand(entry: Entry, repo: str, matches: List[Match], status: str) -> None:
+        for match in matches:
+            add(entry, repo, match, status)
 
     for e in entries:
         if e.op_file:
-            if (e.repo, e.op, e.op_file) not in index:
+            matches = sorted({m for m in _candidates(e.repo, e.op, by_op, by_name, by_file)
+                              if m[1] == e.op_file})
+            if not matches:
                 errors.append(f"line {e.line}: no {e.repo}:{e.op}@{e.op_file} in the inventory")
                 report.append({"line": e.line, "display": e.display, "repo": e.repo,
-                               "op": e.op, "op_file": e.op_file, "status": "ambiguous"})
-                continue
-            add(e, e.repo, e.op_file, e.repo)
+                               "op": e.op, "op_file": e.op_file, "status": "missing"})
+            else:
+                expand(e, e.repo, matches, "multi" if len(matches) > 1 else e.repo)
             continue
 
         if e.explicit:
-            candidates = sorted(set(by_pair.get((e.repo, e.op), [])))
-            if not candidates:
+            matches = _candidates(e.repo, e.op, by_op, by_name, by_file)
+            if not matches:
                 errors.append(f"line {e.line}: no {e.repo}:{e.op} in the inventory")
                 report.append({"line": e.line, "display": e.display, "repo": e.repo,
                                "op": e.op, "op_file": "", "status": "missing"})
-            elif len(candidates) > 1:
-                errors.append(f"line {e.line}: {e.repo}:{e.op} is ambiguous, add "
-                              f"`{e.repo}:<op_file>` on a second line; candidates: "
-                              + ", ".join(candidates))
-                report.append({"line": e.line, "display": e.display, "repo": e.repo,
-                               "op": e.op, "op_file": "", "status": "ambiguous"})
             else:
-                add(e, e.repo, candidates[0], e.repo)
+                expand(e, e.repo, matches, "multi" if len(matches) > 1 else e.repo)
             continue
 
         # No repo in the table: search both.
-        found = {repo: sorted(set(by_pair.get((repo, e.op), [])))
+        found = {repo: _candidates(repo, e.op, by_op, by_name, by_file)
                  for repo in ("main", "vllm")}
-        present = {repo: cands for repo, cands in found.items() if cands}
+        present = {repo: matches for repo, matches in found.items() if matches}
         if not present:
             print(f"{LOG} line {e.line}: {e.display} is in neither main nor vllm; "
                   "recorded as unresolved", file=sys.stderr)
             report.append({"line": e.line, "display": e.display, "repo": "",
                            "op": e.op, "op_file": "", "status": "missing"})
             continue
-        ambiguous = {repo: cands for repo, cands in present.items() if len(cands) > 1}
-        if ambiguous:
-            for repo, cands in ambiguous.items():
-                errors.append(f"line {e.line}: {repo}:{e.op} is ambiguous, add "
-                              f"`{repo}:<op_file>` on a second line; candidates: "
-                              + ", ".join(cands))
-            report.append({"line": e.line, "display": e.display, "repo": "",
-                           "op": e.op, "op_file": "", "status": "ambiguous"})
-            continue
-        status = "both" if len(present) == 2 else next(iter(present))
-        if status == "both":
+        multi = any(len(matches) > 1 for matches in present.values())
+        status = "multi" if multi else ("both" if len(present) == 2 else next(iter(present)))
+        if multi:
+            total = sum(len(matches) for matches in present.values())
+            print(f"{LOG} line {e.line}: {e.display} matches {total} tests; running all",
+                  file=sys.stderr)
+        elif status == "both":
             print(f"{LOG} line {e.line}: {e.display} is in both repos; running main and vllm",
                   file=sys.stderr)
-        for repo, cands in present.items():
-            add(e, repo, cands[0], status)
+        for repo, matches in present.items():
+            expand(e, repo, matches, status)
     return specs, report, errors
 
 

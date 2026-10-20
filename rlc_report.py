@@ -100,7 +100,7 @@ def read_table_order(path: Optional[Path], labels: List[str]) -> Dict[str, int]:
         return {}
     entries = read_table(path)
     try:
-        specs = resolve(entries)
+        specs, _, _ = resolve(entries)
     except SystemExit as exc:
         print(f"{LOG} ordering by op name only: {exc}", file=sys.stderr)
         specs = []
@@ -236,10 +236,33 @@ def build_groups(rows: List[Row]) -> List[Group]:
             for group, rs in groups.items()]
 
 
-def display_name(label: str, op_names: Dict[str, str]) -> str:
-    """`repo:op@op_file` -> `op`, or `op\\nlabel` when the op name is ambiguous."""
+def load_sources(path: Optional[Path]) -> Dict[str, dict]:
+    """`repo:op@op_file` -> the rlc_ops.py provenance row (display/repo/status)."""
+    if not path or not path.is_file():
+        return {}
+    out = {}
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            repo, op = (r.get("repo") or "").strip(), (r.get("op") or "").strip()
+            if not repo or not op:
+                continue
+            op_file = (r.get("op_file") or "").strip()
+            label = f"{repo}:{op}@{op_file}" if op_file else f"{repo}:{op}"
+            out[label] = r
+    return out
+
+
+def display_name(label: str, op_names: Dict[str, int],
+                 sources: Optional[Dict[str, dict]] = None) -> str:
+    """`repo:op@op_file` -> the table's row label, plus a second line when the
+    op needs distinguishing: `display · repo · multi/both` for a name that
+    expanded to several tests, or `repo:op@op_file` for same-named tests."""
     repo, _, rest = label.partition(":")
     op, _, op_file = rest.partition("@")
+    src = (sources or {}).get(label)
+    if src and src.get("status") in ("multi", "both"):
+        shown = (src.get("display") or op).strip()
+        return f"{op}\n{shown} · {repo} · {src['status']}"
     return f"{op}\n{label}" if op_names.get(op, 0) > 1 else op
 
 
@@ -345,6 +368,9 @@ def main() -> None:
                    help="comparison table CSV, for the op order and display names")
     p.add_argument("--notes", type=Path, default=None,
                    help="CSV with columns op,note (manual notes appended to the auto ones)")
+    p.add_argument("--sources", type=Path, default=Path("ops/rlc_ops_sources.csv"),
+                   help="rlc_ops.py provenance CSV, used to mark multi/both ops "
+                        "(default %(default)s)")
     p.add_argument("--out", type=Path, default=Path("rlc_report.xlsx"))
     p.add_argument("--title", default="RLC Enhance 开启前后算子性能对比")
     p.add_argument("--env", default="", help="environment line under the title")
@@ -355,6 +381,7 @@ def main() -> None:
         raise SystemExit(f"{LOG} no rows in {args.csv}")
     gate = load_gate(args.gate)
     notes = load_notes(args.notes)
+    sources = load_sources(args.sources)
     groups = build_groups(rows)
     labels = sorted({g.label for g in groups})
     order = read_table_order(args.table, labels)
@@ -376,7 +403,7 @@ def main() -> None:
         saving = max((r.a_ms - r.b_ms for r in all_rows), default=0.0)
         cost = max((r.b_ms - r.a_ms for r in all_rows), default=0.0)
         note = "；".join(dict.fromkeys(s["note"] for s in stats.values() if s["note"]))
-        out.append({"name": display_name(label, op_names), "label": label,
+        out.append({"name": display_name(label, op_names, sources), "label": label,
                     "rows": len(all_rows), "groups": stats,
                     "saving": max(saving, 0.0), "cost": max(cost, 0.0), "note": note})
 

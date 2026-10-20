@@ -57,16 +57,16 @@ def test_resolve_picks_the_only_op_file(monkeypatch, tmp_path):
     assert not errors
 
 
-def test_resolve_reports_an_ambiguous_op(monkeypatch, tmp_path):
+def test_resolve_expands_every_test_for_one_name(monkeypatch, tmp_path):
     path = tmp_path / "one.csv"
     path.write_text("#,算子\n1,kron\n", encoding="utf-8")
     inv = {"main": [{"op": "kron", "op_file": "kron", "collected": "yes"},
                     {"op": "kron", "op_file": "kron_other", "collected": "yes"}]}
     monkeypatch.setattr(rlc_ops.run_batch, "load_inventory", lambda: inv)
     specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(path))
-    assert specs == []
-    assert report[0]["status"] == "ambiguous"
-    assert any("ambiguous" in e for e in errors)
+    assert specs == ["main:kron@kron", "main:kron@kron_other"]
+    assert [r["status"] for r in report] == ["multi", "multi"]
+    assert not errors
 
 
 def _row(label="main:kron@kron", dtype="torch.bfloat16", gap=0.5, a=0.05, b=0.02,
@@ -177,3 +177,93 @@ def test_resolve_records_an_op_missing_from_both_repos(monkeypatch, tmp_path):
                        "op": "no_such_op", "op_file": "", "status": "missing"}]
     assert not errors  # recorded, not fatal
 
+
+
+def test_resolve_matches_the_benchmark_op_name(monkeypatch, tmp_path):
+    inv = {"main": [{"op": "perf_fft", "op_file": "fft", "op_names": "fft",
+                     "collected": "yes"}]}
+    monkeypatch.setattr(rlc_ops.run_batch, "load_inventory", lambda: inv)
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "fft")))
+    assert specs == ["main:perf_fft@fft"]
+    assert report[0]["status"] == "main"
+    assert not errors
+
+
+def test_resolve_matches_the_op_file_when_op_names_is_empty(monkeypatch, tmp_path):
+    inv = {"main": [{"op": "scaled_grouped_mm_benchmark", "op_file": "scaled_grouped_mm",
+                     "op_names": "", "collected": "yes"}]}
+    monkeypatch.setattr(rlc_ops.run_batch, "load_inventory", lambda: inv)
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "scaled_grouped_mm")))
+    assert specs == ["main:scaled_grouped_mm_benchmark@scaled_grouped_mm"]
+    assert not errors
+
+
+def test_resolve_expands_several_tests_with_one_op_name(monkeypatch, tmp_path):
+    inv = {"main": [{"op": "fused_moe_fp8", "op_file": "fused_moe_fp8",
+                     "op_names": "fused_experts_impl", "collected": "yes"},
+                    {"op": "fused_moe_int8", "op_file": "fused_moe_int8",
+                     "op_names": "fused_experts_impl", "collected": "yes"}]}
+    monkeypatch.setattr(rlc_ops.run_batch, "load_inventory", lambda: inv)
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "fused_experts_impl")))
+    assert specs == ["main:fused_moe_fp8@fused_moe_fp8",
+                     "main:fused_moe_int8@fused_moe_int8"]
+    assert [r["status"] for r in report] == ["multi", "multi"]
+    assert not errors
+
+
+def test_resolve_expands_all_tests_in_both_repos(monkeypatch, tmp_path):
+    inv = {"main": [{"op": "perf_router_gemm", "op_file": "blas_perf_parallel",
+                     "op_names": "router_gemm", "collected": "yes"},
+                    {"op": "perf_router_gemm", "op_file": "router_gemm",
+                     "op_names": "router_gemm", "collected": "yes"}],
+           "vllm": [{"op": "perf_router_gemm", "op_file": "router_gemm",
+                     "op_names": "router_gemm", "collected": "yes"}]}
+    monkeypatch.setattr(rlc_ops.run_batch, "load_inventory", lambda: inv)
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "router_gemm")))
+    assert specs == ["main:perf_router_gemm@blas_perf_parallel",
+                     "main:perf_router_gemm@router_gemm",
+                     "vllm:perf_router_gemm@router_gemm"]
+    assert [r["status"] for r in report] == ["multi", "multi", "multi"]
+    assert not errors
+
+
+def test_display_name_marks_multi_and_both(tmp_path):
+    sources = {
+        "main:fused_moe_fp8@fused_moe_fp8": {"display": "fused_experts_impl",
+                                             "status": "multi"},
+        "vllm:outer@outer": {"display": "outer", "status": "both"},
+    }
+    assert rlc_report.display_name("main:fused_moe_fp8@fused_moe_fp8", {}, sources) == \
+        "fused_moe_fp8\nfused_experts_impl · main · multi"
+    assert rlc_report.display_name("vllm:outer@outer", {}, sources) == \
+        "outer\nouter · vllm · both"
+    # without a source row the old same-name rule applies
+    assert rlc_report.display_name("main:outer@outer", {"outer": 2}, {}) == \
+        "outer\nmain:outer@outer"
+    assert rlc_report.display_name("main:kron@kron", {"kron": 1}, {}) == "kron"
+
+
+def test_load_sources_reads_the_provenance_csv(tmp_path):
+    path = tmp_path / "sources.csv"
+    path.write_text("line,display,repo,op,op_file,status\n"
+                    "7,router_gemm,main,perf_router_gemm,router_gemm,multi\n",
+                    encoding="utf-8")
+    sources = rlc_report.load_sources(path)
+    assert sources["main:perf_router_gemm@router_gemm"]["display"] == "router_gemm"
+    assert sources["main:perf_router_gemm@router_gemm"]["status"] == "multi"
+    assert rlc_report.load_sources(None) == {}
+    assert rlc_report.load_sources(tmp_path / "missing.csv") == {}
+
+
+def test_read_table_order_unpacks_the_resolve_result(monkeypatch, tmp_path):
+    import rlc_ops
+    monkeypatch.setattr(rlc_ops, "resolve",
+                        lambda entries: (["main:kron@kron"], [], []))
+    table = tmp_path / "t.csv"
+    table.write_text("#,算子\n1,kron\n", encoding="utf-8")
+    assert rlc_report.read_table_order(table, ["main:kron@kron"]) == \
+        {"main:kron@kron": 0}
