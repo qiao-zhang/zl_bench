@@ -201,6 +201,24 @@ def cvt_counts(gate_dir: Optional[Path], hashes: List[str]) -> Tuple[Optional[in
     return (before if seen_before else None), (after if seen_after else None)
 
 
+def load_run_kernels(ab_dir: Optional[Path]) -> Dict[Tuple[str, str, str, int], List[str]]:
+    """(run, op_name, dtype, row) -> cache hashes of the kernels the row ran.
+
+    Read from the A-side rounds' rows.tsv (written at run time, so it covers
+    unchanged rows too; the gate's rows.tsv only lists changed kernels)."""
+    if not ab_dir or not ab_dir.is_dir():
+        return {}
+    out = {}
+    for path in ab_dir.glob("r*_a/*/*/rows.tsv"):
+        run = f"{path.parent.parent.name}/{path.parent.name}"
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f, delimiter="\t"):
+                ks = [k for k in (r.get("kernels") or "").split(",") if k and k != "?"]
+                if ks:
+                    out.setdefault((run, r["op_name"], r["dtype"], int(r["row"])), ks)
+    return out
+
+
 def fmt_pct(x: float) -> str:
     return f"{x:+.1%}"
 
@@ -215,8 +233,16 @@ def fmt_time(ms: float) -> str:
     return "<0.1 µs"
 
 
-def fmt_cvt(pair: Tuple[Optional[int], Optional[int]]) -> str:
-    before, after = pair
+def fmt_cvt(pair) -> str:
+    """`before→after`, or `x (kernel unchanged)` when the gate saw no change."""
+    if len(pair) == 2:
+        before, after = pair
+        unchanged = False
+    else:
+        before, after, unchanged = pair
+    if unchanged:
+        x = before if before is not None else after
+        return "" if x is None else f"{x} (kernel unchanged)"
     if after is None:
         return ""
     return f"{'?' if before is None else before}→{after}"
@@ -228,13 +254,19 @@ def fp8_type(dtypes: List[str]) -> str:
 
 def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]],
                 gate_dir: Optional[Path], notes: Dict[str, str], label: str,
-                group: str, reasons: Optional[Dict[str, str]] = None) -> dict:
+                group: str, reasons: Optional[Dict[str, str]] = None,
+                kernels: Optional[Dict[Tuple[str, str, str, int], List[str]]] = None) -> dict:
     gains = [r for r in rows if r.gap > 0]
     losses = [r for r in rows if r.gap < 0]
     total = len(rows)
-    cvt_before = cvt_after = None
-    hashes = sorted({h for r in rows for h in gate.get(
+    changed_hashes = sorted({h for r in rows for h in gate.get(
         (r.run, r.op_name, r.dtype, r.row), [])})
+    all_hashes = sorted({h for r in rows for h in (
+        gate.get((r.run, r.op_name, r.dtype, r.row), []) or
+        (kernels or {}).get((r.run, r.op_name, r.dtype, r.row), []))})
+    hashes = changed_hashes or all_hashes
+    unchanged = not changed_hashes and bool(all_hashes)
+    cvt_before = cvt_after = None
     if hashes:
         cvt_before, cvt_after = cvt_counts(gate_dir, hashes)
     flags = {f for r in rows for f in r.flags.split(";") if f}
@@ -258,7 +290,7 @@ def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]
                  max((r.gap for r in gains), default=None), len(gains)),
         "loss": (max((r.gap for r in losses), default=None),
                  min((r.gap for r in losses), default=None), len(losses)),
-        "cvt": (cvt_before, cvt_after),
+        "cvt": (cvt_before, cvt_after, unchanged),
         "note": "；".join(note),
     }
 
@@ -423,6 +455,7 @@ def main() -> None:
     notes = load_notes(args.notes)
     sources = load_sources(args.sources)
     reasons = load_do_bench_reasons(args.ab_dir or args.csv.parent)
+    kernels = load_run_kernels(args.ab_dir or args.csv.parent)
     groups = build_groups(rows)
     labels = sorted({g.label for g in groups})
     order = read_table_order(args.table, labels)
@@ -439,7 +472,8 @@ def main() -> None:
     for label in labels:
         groups_of = by_label[label]
         all_rows = [r for rs in groups_of.values() for r in rs]
-        stats = {group: summarizing(rs, gate, args.gate, notes, label, group, reasons)
+        stats = {group: summarizing(rs, gate, args.gate, notes, label, group,
+                                    reasons, kernels)
                  for group, rs in groups_of.items()}
         saving = max((r.a_ms - r.b_ms for r in all_rows), default=0.0)
         cost = max((r.b_ms - r.a_ms for r in all_rows), default=0.0)

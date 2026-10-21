@@ -82,7 +82,7 @@ def test_summarizing_splits_gain_and_loss_rows():
     assert stats["rows"] == 3
     assert stats["gain"] == (0.5, 1.5, 2)
     assert stats["loss"] == (-0.2, -0.2, 1)
-    assert stats["cvt"] == (None, None)
+    assert stats["cvt"] == (None, None, False)
 
 
 def test_summarizing_reads_the_gate_convert_layout_count(tmp_path):
@@ -92,8 +92,33 @@ def test_summarizing_reads_the_gate_convert_layout_count(tmp_path):
     (tmp_path / "new" / "H1" / "k.digest.json").write_text('{"ops": {"ttg.convert_layout": 0}}')
     gate = {("main/kron", "kron", "torch.bfloat16", 0): ["H1"]}
     stats = rlc_report.summarizing([_row()], gate, tmp_path, {}, "main:kron@kron", "bf16")
-    assert stats["cvt"] == (2, 0)
+    assert stats["cvt"] == (2, 0, False)
     assert rlc_report.fmt_cvt(stats["cvt"]) == "2→0"
+
+
+def test_summarizing_marks_an_unchanged_kernel_with_its_convert_count(tmp_path):
+    (tmp_path / "base" / "H1").mkdir(parents=True)
+    (tmp_path / "new" / "H1").mkdir(parents=True)
+    (tmp_path / "base" / "H1" / "k.digest.json").write_text('{"ops": {"ttg.convert_layout": 2}}')
+    (tmp_path / "new" / "H1" / "k.digest.json").write_text('{"ops": {"ttg.convert_layout": 2}}')
+    kernels = {("main/kron", "kron", "torch.bfloat16", 0): ["H1"]}
+    stats = rlc_report.summarizing([_row()], {}, tmp_path, {}, "main:kron@kron", "bf16",
+                                   None, kernels)
+    assert stats["cvt"] == (2, 2, True)
+    assert rlc_report.fmt_cvt(stats["cvt"]) == "2 (kernel unchanged)"
+
+
+def test_load_run_kernels_reads_the_a_side_rows_tsv(tmp_path):
+    path = tmp_path / "r1_a" / "main" / "kron" / "rows.tsv"
+    path.parent.mkdir(parents=True)
+    path.write_text("op_name\tdtype\trow\tshape\tkernels\n"
+                    "kron\ttorch.bfloat16\t0\t4x4\tH1\n"
+                    "kron\ttorch.bfloat16\t1\t8x8\tH1,H2\n", encoding="utf-8")
+    assert rlc_report.load_run_kernels(tmp_path) == {
+        ("main/kron", "kron", "torch.bfloat16", 0): ["H1"],
+        ("main/kron", "kron", "torch.bfloat16", 1): ["H1", "H2"],
+    }
+    assert rlc_report.load_run_kernels(None) == {}
 
 
 def test_dtype_groups_and_formatters():
