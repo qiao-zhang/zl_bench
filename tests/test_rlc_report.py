@@ -267,3 +267,37 @@ def test_read_table_order_unpacks_the_resolve_result(monkeypatch, tmp_path):
     table.write_text("#,算子\n1,kron\n", encoding="utf-8")
     assert rlc_report.read_table_order(table, ["main:kron@kron"]) == \
         {"main:kron@kron": 0}
+
+
+def test_load_notes_ignores_a_missing_file(tmp_path):
+    assert rlc_report.load_notes(None) == {}
+    assert rlc_report.load_notes(tmp_path / "missing.csv") == {}
+
+
+def test_load_do_bench_reasons_reads_the_marker(tmp_path):
+    log = tmp_path / "r1_a" / "main" / "kron" / "run.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "BENCHMARK_DIRECT_NO_CUDAGRAPH op=kron phase=host_sync reason=_HostSync "
+        "detail='tensor.item()' \n"
+        "BENCHMARK_DIRECT_NO_CUDAGRAPH op=kron phase=warmup reason=OutOfResources "
+        "detail='out of memory'\n", encoding="utf-8")
+    assert rlc_report.load_do_bench_reasons(tmp_path) == {
+        "main/kron": "host 同步；预热显存不足"}
+    assert rlc_report.load_do_bench_reasons(None) == {}
+    assert rlc_report.load_do_bench_reasons(tmp_path / "missing") == {}
+
+
+def test_describe_do_bench_covers_the_phases():
+    assert rlc_report.describe_do_bench("host_sync", "_HostSync") == "host 同步"
+    assert rlc_report.describe_do_bench("capability", "GraphUnsupported") == "平台无 graph API"
+    assert rlc_report.describe_do_bench("warmup", "OutOfResources") == "预热显存不足"
+    assert rlc_report.describe_do_bench("capture", "AcceleratorError") == \
+        "capture 失败: AcceleratorError"
+
+
+def test_summarizing_appends_the_do_bench_reason():
+    rows = [_row(gap=-0.2, flags="do_bench", verdict="slower")]
+    stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16",
+                                   {"main/kron": "host 同步"})
+    assert "do_bench 计时（host 同步）" in stats["note"]

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -119,7 +120,8 @@ def read_table_order(path: Optional[Path], labels: List[str]) -> Dict[str, int]:
 
 
 def load_notes(path: Optional[Path]) -> Dict[str, str]:
-    if not path:
+    """Optional `op,note` CSV; a missing file means no manual notes."""
+    if not path or not path.is_file():
         return {}
     out = {}
     with path.open(newline="", encoding="utf-8-sig") as f:
@@ -129,6 +131,39 @@ def load_notes(path: Optional[Path]) -> Dict[str, str]:
             if key and note:
                 out[key] = note
     return out
+
+
+_DO_BENCH_RE = re.compile(
+    r"BENCHMARK_DIRECT_NO_CUDAGRAPH\b.*?\bphase=(\w+)\s+reason=(\w+)")
+
+
+def describe_do_bench(phase: str, reason: str) -> str:
+    """Reason to append to the do_bench note."""
+    if phase == "host_sync":
+        return "host 同步"
+    if phase == "capability":
+        return "平台无 graph API"
+    if phase == "sync":
+        return "测量前同步失败"
+    if phase == "warmup" and reason == "OutOfResources":
+        return "预热显存不足"
+    return f"{phase} 失败: {reason}"
+
+
+def load_do_bench_reasons(ab_dir: Optional[Path]) -> Dict[str, str]:
+    """`<repo>/<run_name>` -> why its tables fell back to do_bench.
+
+    Reads the BENCHMARK_DIRECT_NO_CUDAGRAPH markers in r<k>_<side>/<repo>/<op>/
+    run.log of an ab_run.py output. Rows without a marker get no entry."""
+    if not ab_dir or not ab_dir.is_dir():
+        return {}
+    found: Dict[str, set] = defaultdict(set)
+    for log in ab_dir.glob("r*_*/*/*/run.log"):
+        run = f"{log.parent.parent.name}/{log.parent.name}"
+        text = log.read_text(errors="replace")
+        for phase, reason in _DO_BENCH_RE.findall(text):
+            found[run].add(describe_do_bench(phase, reason))
+    return {run: "；".join(sorted(why)) for run, why in found.items()}
 
 
 def load_gate(gate_dir: Optional[Path]) -> Dict[Tuple[str, str, str, int], List[str]]:
@@ -193,7 +228,7 @@ def fp8_type(dtypes: List[str]) -> str:
 
 def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]],
                 gate_dir: Optional[Path], notes: Dict[str, str], label: str,
-                group: str) -> dict:
+                group: str, reasons: Optional[Dict[str, str]] = None) -> dict:
     gains = [r for r in rows if r.gap > 0]
     losses = [r for r in rows if r.gap < 0]
     total = len(rows)
@@ -205,7 +240,9 @@ def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]
     flags = {f for r in rows for f in r.flags.split(";") if f}
     note = []
     if "do_bench" in flags:
-        note.append("do_bench 计时，波动较大")
+        why = sorted({(reasons or {}).get(r.run, "") for r in rows
+                      if "do_bench" in r.flags.split(";")} - {""})
+        note.append("do_bench 计时" + (f"（{'；'.join(why)}）" if why else ""))
     if "replay_fallback" in flags:
         note.append("replay 回退，config 不一致")
     if rows and all(r.gate == "unchanged" for r in rows) and \
@@ -368,6 +405,9 @@ def main() -> None:
                    help="comparison table CSV, for the op order and display names")
     p.add_argument("--notes", type=Path, default=None,
                    help="CSV with columns op,note (manual notes appended to the auto ones)")
+    p.add_argument("--ab-dir", type=Path, default=None,
+                   help="ab_run.py output dir, read for the do_bench fallback reasons "
+                        "(default: the directory of --csv)")
     p.add_argument("--sources", type=Path, default=Path("ops/rlc_ops_sources.csv"),
                    help="rlc_ops.py provenance CSV, used to mark multi/both ops "
                         "(default %(default)s)")
@@ -382,6 +422,7 @@ def main() -> None:
     gate = load_gate(args.gate)
     notes = load_notes(args.notes)
     sources = load_sources(args.sources)
+    reasons = load_do_bench_reasons(args.ab_dir or args.csv.parent)
     groups = build_groups(rows)
     labels = sorted({g.label for g in groups})
     order = read_table_order(args.table, labels)
@@ -398,7 +439,7 @@ def main() -> None:
     for label in labels:
         groups_of = by_label[label]
         all_rows = [r for rs in groups_of.values() for r in rs]
-        stats = {group: summarizing(rs, gate, args.gate, notes, label, group)
+        stats = {group: summarizing(rs, gate, args.gate, notes, label, group, reasons)
                  for group, rs in groups_of.items()}
         saving = max((r.a_ms - r.b_ms for r in all_rows), default=0.0)
         cost = max((r.b_ms - r.a_ms for r in all_rows), default=0.0)
