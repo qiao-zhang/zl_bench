@@ -89,7 +89,8 @@ def parse_args() -> argparse.Namespace:
 
     e = p.add_argument_group("execution")
     e.add_argument("--gpus", default=None,
-                   help="comma-separated GPU list (default: CUDA_VISIBLE_DEVICES or all)")
+                   help="comma-separated GPU list (default: MACA_VISIBLE_DEVICES / "
+                          "CUDA_VISIBLE_DEVICES, else every device the SMI tool lists)")
     e.add_argument("--dtypes", default="", help='dtype whitelist, e.g. "bfloat16 float16"')
     e.add_argument("--shape-file", type=Path, default=None,
                    help="shape set (default: the record's archived shapes.yaml per op)")

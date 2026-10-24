@@ -76,7 +76,7 @@ def read_ab_csv(path: Path) -> List[Row]:
                                float(r["gap"]), float(r["median_a_ms"]), float(r["median_b_ms"]),
                                r.get("gate", ""), r.get("flags", ""), r.get("verdict", "")))
             except (KeyError, ValueError) as exc:
-                raise SystemExit(f"{LOG} bad row in {path}: {r} ({exc})")
+                raise SystemExit(f"{LOG} bad row in {path}: {r} ({exc})") from exc
     return out
 
 
@@ -343,7 +343,8 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
         from openpyxl.utils import get_column_letter
     except ImportError:
-        raise SystemExit(f"{LOG} openpyxl is needed for xlsx output: pip install openpyxl")
+        raise SystemExit(
+            f"{LOG} openpyxl is needed for xlsx output: pip install openpyxl") from None
 
     wb = Workbook()
     ws = wb.active

@@ -22,10 +22,13 @@ released (_release_memory) and followed by one untimed call
 (_absorb_aborted_capture) before the fallback.
 
 Accelerators whose torch backend presents itself as cuda but implements only
-part of the CUDA graph API (the T-Head PPU) still go through this path: every
-measurement tries the graph first, and the optional helpers — sync-debug mode,
-graphsafe RNG state, the RNG generator list — are skipped when missing instead
-of failing the measurement. When the graph mechanism itself is absent (no
+part of the CUDA graph API (the T-Head PPU, and MetaX's MACA layer, which also
+presents `torch.cuda`) still go through this path: every measurement tries the
+graph first, and the optional helpers — sync-debug mode, graphsafe RNG state,
+the RNG generator list — are skipped when missing instead of failing the
+measurement. No backend needs a special case here; an op whose capture crashes
+the process (a segfault cannot be caught) is opted out by name with
+NO_CUDAGRAPH_OPS. When the graph mechanism itself is absent (no
 torch.cuda.CUDAGraph, or capture reported unsupported) graph timing is turned
 off for the rest of that pytest process, i.e. for this op: its remaining shapes
 go straight to do_bench. The next op runs in a fresh process and tries again, so
@@ -47,8 +50,8 @@ _MAX_CALLS_ENV = "GRAPH_MAX_CALLS"
 DEFAULT_MAX_CALLS = 1000
 MIN_SAFE_CALLS = 250  # smaller graphs read 1 us kernels too fast (graph_plan)
 N_SAMPLES = 10  # graph replays per measurement, as in do_bench_cudagraph
-# torch.cuda API the graph path needs; a backend that lacks one (the PPU
-# compatibility layer implements most, but not necessarily all of it) never
+# torch.cuda API the graph path needs; a backend that lacks one (the PPU and
+# MACA compatibility layers implement most, but not necessarily all of it) never
 # gets a capture attempt.
 _GRAPH_APIS = ("CUDAGraph", "graph", "Stream", "Event", "synchronize", "current_stream", "stream",
                "current_device", "empty_cache")

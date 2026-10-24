@@ -1,2 +1,0 @@
-op,run,op_name,dtype,row,size_detail,gate,rounds,median_a_ms,median_b_ms,gap,p,verdict,flags,confirm,confirm_rounds,confirm_gap,confirm_p
-main:kron@kron,main/kron,kron,torch.bfloat16,0,4x4,changed,6,0.05,0.02,1.5,0.001,faster,do_bench,,,

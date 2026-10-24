@@ -58,12 +58,12 @@ Environment: NVIDIA H20 (Hopper, driver 595.45), CUDA 13.0, PyTorch 2.11.0, Pyth
 
 ## Requirements
 
-- An NVIDIA GPU (developed and tested on H20, Hopper) or a T-Head PPU (Zhenwu 810E); FlagTree's `ppu` backend and FlagGems' `thead` vendor cover the PPU, which PyTorch exposes through the same `torch.cuda` interface
+- An NVIDIA GPU (developed and tested on H20, Hopper), a T-Head PPU (Zhenwu 810E) or a MetaX GPU (C550 / C500); FlagTree's `ppu` and `metax` backends and FlagGems' `thead` and `metax` vendors cover the last two, which PyTorch exposes through the same `torch.cuda` interface
 - Python 3.10+ and PyTorch
 - A FlagTree build of Triton 3.6 (the plugins use `knobs.compilation.listener` and the kernel launch hooks)
 - Checkouts of FlagGems and/or FlagGems-vllm
 
-On PPU, device numbers and the idle check come from `ppu-smi` instead of `nvidia-smi` (`ZL_BENCH_SMI` overrides either, and without one the batch assumes a single card unless `--gpus` is given). The compile-diff gate compares the backend's final binary stage, `hgbin` on PPU and `cubin` on NVIDIA. CUDA-graph timing is still tried for every measurement: an op that cannot be captured falls back to `do_bench` and its log carries a `BENCHMARK_DIRECT_NO_CUDAGRAPH` marker, and when the platform lacks the graph API altogether the rest of that op skips the attempt. The inventory and `ops/dismiss.txt` were built on NVIDIA; rebuild them with `gen_inventory.py` on a PPU box. FlagGems' `thead` environment (`torch==2.10.0+ppu2.1.1`, `flagtree==0.7.0+ppu3.6`, sourced from `/usr/local/PPU_SDK/envsetup.sh`) provides the matching stack; FlagGems detects the vendor from `PPU_SDK`, and `GEMS_VENDOR=thead` forces it.
+On PPU and MetaX, device numbers and the idle check come from the vendor's management tool (`ppu-smi`, `mx-smi`) instead of `nvidia-smi`; `ZL_BENCH_SMI` overrides any of them, and without one the batch assumes a single card unless `--gpus` is given. The tool is chosen by the vendor stack found in the environment (`PPU_SDK` → `ppu-smi`, `MACA_PATH` → `mx-smi`), so an nvidia-smi that cannot enumerate those cards does not win by being installed. On MetaX the default card list also honours `MACA_VISIBLE_DEVICES`, and each op is launched with `MACA_VISIBLE_DEVICES` set to its own card, so the MACA runtime does not read the caller's mask instead of the batch's sharding. The compile-diff gate compares the backend's final binary stage: `hgbin` on PPU, `mcfatbin` on MetaX and `cubin` on NVIDIA. CUDA-graph timing is still tried for every measurement: an op that cannot be captured falls back to `do_bench` and its log carries a `BENCHMARK_DIRECT_NO_CUDAGRAPH` marker, and when the platform lacks the graph API altogether the rest of that op skips the attempt; a capture that crashes the process is opted out by name with `NO_CUDAGRAPH_OPS`. The inventory and `ops/dismiss.txt` were built on NVIDIA; rebuild them with `gen_inventory.py` on a PPU or MetaX box. FlagGems' `thead` environment (`torch==2.10.0+ppu2.1.1`, `flagtree==0.7.0+ppu3.6`, sourced from `/usr/local/PPU_SDK/envsetup.sh`) provides the matching PPU stack, and the MACA stack (`/opt/maca`, `MACA_PATH`) with `torch==2.10.0+metax3.8.1.0` and `flagtree==0.7.0+metax3.6` the MetaX one; FlagGems detects the vendor from `PPU_SDK` / `mx-smi`, and `GEMS_VENDOR=thead` / `GEMS_VENDOR=metax` forces it.
 
 ## Installation
 
@@ -87,7 +87,7 @@ The compiler under test is whatever `import triton` resolves to. To test a FlagT
 
 ## Quick start
 
-Check that the GPU is idle (`nvidia-smi`, or `ppu-smi` on PPU), then benchmark one op:
+Check that the GPU is idle (`nvidia-smi`, or `ppu-smi` / `mx-smi` on PPU / MetaX), then benchmark one op:
 
 ```bash
 cd zl_bench
@@ -220,7 +220,7 @@ python run_batch.py --ops-file my_ops.txt --env FLAGTREE_XXX=1
 - With `--dtypes`, an op that rejects the dtype is rerun without the filter (`dtype_fallback`); any other failure without a SUCCESS row gets one last unfiltered run (`dtype_rescue`).
 - Runtime skipif and xfail count as SKIP. Only PASS and SKIP are marked complete for `--resume`.
 - `ops_status.csv` has one row per op (status, time, rows, notes) and is updated as ops finish; `summary.csv` has one row per result row, and `batch_summary.py` rebuilds it for older batches. The notes column counts `no_cudagraph_rows` and `replay_fallback`; read it first.
-- Before an op starts, its GPU must be idle: no process in the device management tool (`nvidia-smi`, or `ppu-smi` on PPU), and under 1 GiB in use (processes of other containers are not listed). A neighbour on the same GPU skews both timing and tuning, so the batch waits (`--busy-gpu wait`, the default; `warn` measures anyway and notes `gpu_busy`). GPU numbers follow that tool (`CUDA_DEVICE_ORDER=PCI_BUS_ID`).
+- Before an op starts, its GPU must be idle: no process in the device management tool (`nvidia-smi`, or `ppu-smi` / `mx-smi` on PPU / MetaX), and under 1 GiB in use (processes of other containers are not listed). A neighbour on the same GPU skews both timing and tuning, so the batch waits (`--busy-gpu wait`, the default; `warn` measures anyway and notes `gpu_busy`). GPU numbers follow that tool (`CUDA_DEVICE_ORDER=PCI_BUS_ID`).
 - Batch numbers are a screen: GPUs running side by side couple through power and thermals. Confirm suspects with a [repeated-measures A/B](#repeated-measures-ab).
 
 **Reference full run** ([tested versions](#tested-versions), 7×H20, `--dtypes bfloat16`, single-shape set): `--all` selects 1608 ops and takes about 2.5 hours, 12 s per op at the median (mostly process start and imports). PASS 1529, SKIP 43; the other 36 fail for upstream or environment reasons and are listed in `ops/dismiss.txt`. Every SKIP is an upstream skipif (a missing TransformerEngine or vLLM reference, another vendor or architecture). On the multi-shape set (275 ops, `--dtypes "bfloat16 float16"`) an op takes about a minute at the median and up to two hours in record mode (`chunk_gdn2`), so give it `--op-timeout 7200`.
@@ -279,7 +279,7 @@ With no conflicts the configs can be trusted; with many, rerun without `PARALLEL
 | `USE_FLAGTUNE` | `0` | `1` uses the FlagTune expanded tuning space (slow full search on first run); same value on both A/B sides |
 | `PARALLEL_WARMUP_GPUS` | empty: serial | shard the autotune sweep across N (≥2) GPUs |
 | `GRAPH_MAX_CALLS` | `1000` | most calls unrolled into one CUDA graph; `0` = no cap ([details](docs/design.md#graph-size)) |
-| `NO_CUDAGRAPH_OPS` | empty | comma-separated op names that skip CUDA-graph timing and go straight to `do_bench`; for ops whose capture segfaults (a segfault cannot be caught), e.g. `lstm`; the log marks `phase=disabled` |
+| `NO_CUDAGRAPH_OPS` | empty | comma-separated op-name substrings that skip CUDA-graph timing and go straight to `do_bench`; for ops whose capture segfaults (a segfault cannot be caught), e.g. `lstm`. A name matches anywhere in the op name, so `mm` also catches `bmm`; the log marks `phase=disabled` |
 | `OUT_DIR` | `runs/<op>_<timestamp>` | output dir |
 | `FLAGGEMS_PERF_COLOR` | empty: auto by tty | `always`/`never` for terminal color; `run.log` is always plain |
 
@@ -360,7 +360,7 @@ runs/softmax_20260716-031752/
 
 - **My latency differs a lot from someone else's.**
 
-  Check that the GPU is not shared (`nvidia-smi`, or `ppu-smi` on PPU), then whether they used CUDA graph timing: for small shapes such as M=1, launch overhead dominates and plain `do_bench` can read 2× or more; large shapes mostly agree.
+  Check that the GPU is not shared (`nvidia-smi`, or `ppu-smi` / `mx-smi` on PPU / MetaX), then whether they used CUDA graph timing: for small shapes such as M=1, launch overhead dominates and plain `do_bench` can read 2× or more; large shapes mostly agree.
 
 - **Same shapes, nothing changed, yet two runs give different speedups.**
 

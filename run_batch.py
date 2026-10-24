@@ -21,11 +21,12 @@ This layer only orchestrates:
 - replay: --replay-root points at an earlier batch dir and passes
   REPLAY_FROM=<root>/<repo>/<op> per op, same semantics as single-op replay;
 - idle GPUs: before each op starts, the accelerator management tool
-  (nvidia-smi on NVIDIA, ppu-smi on PPU) must show no other process on its GPU
-  (--busy-gpu wait, the default; warn or ignore to relax it), since a neighbour
-  on the same GPU skews both the timing and the autotune choices. GPU numbers
-  follow that tool (CUDA_DEVICE_ORDER=PCI_BUS_ID). Without either tool the batch
-  assumes one device, so list the cards explicitly with --gpus.
+  (nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU, mx-smi on MetaX) must show
+  no other process on its GPU (--busy-gpu wait, the default; warn or ignore to
+  relax it), since a neighbour on the same GPU skews both the timing and the
+  autotune choices. GPU numbers follow that tool (CUDA_DEVICE_ORDER=PCI_BUS_ID).
+  Without any of them the batch assumes one device, so list the cards explicitly
+  with --gpus.
 
 Outputs: <batch>/ops_status.csv (one row per op) and summary.csv (one row per
 result-table row, written by batch_summary.py).
@@ -69,27 +70,40 @@ MAX_RETRIES = 2
 BUSY_POLL_S = 30
 BUSY_REPORT_S = 300
 # Accelerator management tool, the source of GPU numbers and the idle check:
-# nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU (the name FlagGems' thead
-# vendor reports as device_query_cmd). ZL_BENCH_SMI overrides the choice, for a
-# box where both are installed or the tool has another name.
+# nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU, mx-smi on MetaX (each is the
+# name the matching FlagGems vendor reports as device_query_cmd). ZL_BENCH_SMI
+# overrides the choice, for a box where several are installed or the tool has
+# another name.
 SMI_ENV = "ZL_BENCH_SMI"
-SMI_TOOLS = ("nvidia-smi", "ppu-smi")
-# The two tools do not share their query spelling: nvidia-smi takes
-# --list-gpus/--query-gpu, ppu-smi -L/--query-ppu. Try the PPU spelling first
-# (it is the narrower one), then the NVIDIA spelling; a tool accepts one and
-# rejects the other, so the first non-empty answer wins.
+SMI_TOOLS = ("nvidia-smi", "ppu-smi", "mx-smi")
+# A vendor stack's environment variable, and the tool that ships with it. A box
+# often carries an nvidia-smi that cannot enumerate its own devices, so the
+# stack is the stronger signal than the tool order.
+SMI_VENDOR_ENV = (("PPU_SDK", "ppu-smi"), ("MACA_PATH", "mx-smi"))
+# The tools do not share their query spelling: nvidia-smi takes
+# --list-gpus/--query-gpu, ppu-smi -L/--query-ppu, mx-smi follows the MACA
+# release. Try the narrower spellings first, then the NVIDIA one; a tool
+# accepts one and rejects the others, so the first non-empty answer wins.
 SMI_LIST_ARGS = (["-L"], ["--list-gpus"], ["--list-ppus"])
 SMI_GPU_ARGS = (
     ["--query-ppu=index,uuid,memory.used", "--format=csv,noheader,nounits"],
     ["--query-gpu=index,uuid,memory.used", "--format=csv,noheader,nounits"],
 )
 SMI_APPS_ARGS = (
-    ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
-     "--format=csv,noheader,nounits"],
     ["--query-compute-apps=ppu_uuid,pid,process_name,used_memory",
      "--format=csv,noheader,nounits"],
+    ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+     "--format=csv,noheader,nounits"],
 )
-_LIST_GPU_RE = re.compile(r"^\s*(?:GPU|PPU)\s+\d+:")
+_LIST_GPU_RE = re.compile(r"^\s*(?:GPU|PPU)\s*#?\s*\d+\s*:")
+# mx-smi's summary block states the device count in its `Attached GPUs: N` line
+# (FlagGems' gpu_check_metax.sh reads the same field); used when no -L spelling
+# works.
+_ATTACHED_RE = re.compile(r"^\s*Attached\b[^:\n]*:\s*(\d+)\s*$", re.MULTILINE)
+# Device-visibility variables, the stack-specific one first: the MACA runtime
+# (MetaX) reads MACA_VISIBLE_DEVICES, NVIDIA and the PPU compatibility layer
+# read CUDA_VISIBLE_DEVICES.
+VISIBLE_ENVS = ("MACA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 # Memory in use that marks a GPU busy even when the management tool lists no
 # process on it (processes of other containers or PID namespaces are not
 # listed). An idle GPU shows a few MiB.
@@ -259,35 +273,58 @@ def parse_env(pairs: Optional[Sequence[str]]) -> Dict[str, str]:
 
 # ---------------- GPUs ----------------
 
+def accelerator(env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The vendor stack in use: metax / ppu, or None when no stack marker is set
+    (a plain NVIDIA box, or a caller that only sets ZL_BENCH_SMI). `env` defaults
+    to this process's environment."""
+    env = os.environ if env is None else env
+    if env.get("MACA_PATH") or env.get("MACA_VISIBLE_DEVICES"):
+        return "metax"
+    if env.get("PPU_SDK"):
+        return "ppu"
+    return None
+
+
 def smi_tool() -> Optional[str]:
     """The accelerator management tool in use, or None when none is installed.
 
-    nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU; ZL_BENCH_SMI overrides."""
+    nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU, mx-smi on MetaX;
+    ZL_BENCH_SMI overrides."""
     explicit = os.environ.get(SMI_ENV, "").strip()
     if explicit:
         return explicit
-    # A PPU box often carries an nvidia-smi that cannot enumerate PPUs, so the
-    # PPU SDK environment is the stronger signal than the tool order.
-    if os.environ.get("PPU_SDK") and shutil.which("ppu-smi"):
-        return "ppu-smi"
+    # A PPU or MetaX box often carries an nvidia-smi that cannot enumerate its
+    # own devices, so the vendor stack's environment is the stronger signal
+    # than the tool order.
+    for env_key, tool in SMI_VENDOR_ENV:
+        if os.environ.get(env_key) and shutil.which(tool):
+            return tool
     return next((tool for tool in SMI_TOOLS if shutil.which(tool)), None)
 
 
 def visible_gpus(arg: Optional[str]) -> List[str]:
     if arg:
         return [g.strip() for g in arg.split(",") if g.strip()]
-    env = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    if env:
-        return [g.strip() for g in env.split(",") if g.strip()]
-    out = _smi_first(SMI_LIST_ARGS)
-    if out:
-        lines = [line for line in out.splitlines() if line.strip()]
-        # `GPU 0: ...` on nvidia-smi, `PPU 0: ...` on ppu-smi; line count is
-        # the fallback for a tool that lists devices in another wording.
-        n = sum(1 for line in lines if _LIST_GPU_RE.match(line)) or len(lines)
-        if n:
-            return [str(i) for i in range(n)]
-    return ["0"]
+    for key in VISIBLE_ENVS:
+        env = os.environ.get(key, "").strip()
+        if env:
+            return [g.strip() for g in env.split(",") if g.strip()]
+    # -L lists devices on nvidia-smi/ppu-smi; mx-smi answers in its own spelling
+    # per MACA release, so fall back to its summary block.
+    n = _device_count(_smi_first(SMI_LIST_ARGS) or _smi([]) or "")
+    return [str(i) for i in range(n)] if n else ["0"]
+
+
+def _device_count(text: str) -> int:
+    """Devices in a management tool's listing (`GPU 0: ...` on nvidia-smi,
+    `PPU 0: ...` on ppu-smi, `GPU#0: ...` on some MACA releases), else in
+    mx-smi's `Attached GPUs: N` summary line."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    n = sum(1 for line in lines if _LIST_GPU_RE.match(line))
+    if n:
+        return n
+    attached = _ATTACHED_RE.search(text)
+    return int(attached.group(1)) if attached else 0
 
 
 def _smi(args: List[str]) -> Optional[str]:
@@ -312,8 +349,8 @@ def _smi_first(arg_sets: Sequence[List[str]]) -> Optional[str]:
 
 def parse_gpus(text: str) -> Dict[str, Tuple[str, int]]:
     """`<tool> --query-gpu=index,uuid,memory.used --format=csv,noheader,nounits`
-    (nvidia-smi, or ppu-smi which mirrors its options) -> {index: (uuid, MiB in
-    use)}, also keyed by uuid."""
+    (nvidia-smi, or ppu-smi/mx-smi which mirror its options) -> {index: (uuid,
+    MiB in use)}, also keyed by uuid."""
     out = {}
     for line in text.splitlines():
         parts = [x.strip() for x in line.split(",")]
@@ -363,8 +400,8 @@ def wait_for_idle_gpu(gpu: str, policy: str) -> str:
         if not _smi_missing_reported.is_set():
             _smi_missing_reported.set()
             tool = smi_tool()
-            reason = (f"no accelerator management tool (install nvidia-smi or ppu-smi, "
-                      f"or set {SMI_ENV})" if tool is None
+            reason = (f"no accelerator management tool (install nvidia-smi, ppu-smi "
+                      f"or mx-smi, or set {SMI_ENV})" if tool is None
                       else f"{tool} cannot list GPU processes "
                            "(tried -L/--query-ppu/--query-gpu and their compute-apps forms)")
             print(f"{LOG} warning: {reason}; not checking that GPUs are idle", flush=True)
@@ -422,6 +459,11 @@ def _spawn(case: Case, out_dir: Path, gpu: str, args: argparse.Namespace,
         "NO_COLOR": "1",
         "USE_FLAGTUNE": str(args.use_flagtune),
     })
+    # The MACA runtime (MetaX) reads its own visibility variable, and one
+    # inherited from the caller's shell or passed by --env would override this
+    # op's sharding.
+    if accelerator(env) == "metax":
+        env["MACA_VISIBLE_DEVICES"] = gpu
     if args.shape_file:  # unset under replay: run_pytest.sh reuses the A side's archive
         env["SHAPE_FILE"] = str(args.shape_file)
     if dtypes:
@@ -577,7 +619,8 @@ def parse_args() -> argparse.Namespace:
 
     run = p.add_argument_group("execution")
     run.add_argument("--gpus", default=None,
-                     help="comma-separated GPU list (default: CUDA_VISIBLE_DEVICES or all)")
+                     help="comma-separated GPU list (default: MACA_VISIBLE_DEVICES / "
+                          "CUDA_VISIBLE_DEVICES, else every device the SMI tool lists)")
     run.add_argument("--batch-dir", type=Path, default=None,
                      help="output dir (default runs/batch_<timestamp>; required with --resume)")
     run.add_argument("--op-timeout", type=int, default=1800,

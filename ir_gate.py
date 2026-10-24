@@ -15,13 +15,15 @@ selects, one to two orders of magnitude faster than a blind full run.
       --base-env FLAGTREE_XXX=0 --new-env FLAGTREE_XXX=1
 
 Each variant is compiled down to the backend's binary stage on both sides (--stage
-binary, the default: cubin on NVIDIA, hgbin on the PPU backend). A variant is
+binary, the default: cubin on NVIDIA, hgbin on the PPU backend, mcfatbin on the
+MetaX backend). A variant is
 unchanged only if that binary and the launch metadata Triton derives (shared
 memory, warps, ...) are identical: then the measured kernel is the same binary.
 TTGIR alone is not enough: a reordering, or a change in a later stage, leaves the
 TTGIR ops intact but changes the code the backend's assembler emits. The stage
 chain is read from the backend itself (backend.add_stages), never hardcoded, so a
-run recorded on PPU compares hgbin and a run recorded on NVIDIA compares cubin.
+run recorded on PPU compares hgbin, a run recorded on MetaX compares mcfatbin, and
+a run recorded on NVIDIA compares cubin.
 Line info is turned off on both sides (TRITON_DISABLE_LINE_INFO=1, unless an
 --*-env sets it), so a moved source location alone does not count as a change; it
 does not change the code.
@@ -66,7 +68,9 @@ from run_batch import parse_env
 LOG = "[ir-gate]"
 # NVIDIA's stage chain, used only for digests written before a run recorded its
 # backend's own chain (and for --stage ttgir, where the recorded ttgir is the
-# baseline). New digests carry "stages" and "binary"; see _compile_one.
+# baseline). New digests carry "stages" and "binary"; see _compile_one. The PPU
+# chain is ttir/ttgir/llir/hgbin and MetaX's ttir/ttgir/mlir/llir/mcfatbin, so a
+# digest that records its chain is the only reliable source.
 STAGES = ("ttgir", "llir", "ptx", "cubin")
 # Launch parameters Triton derives during compilation; a difference changes the launch
 # even when the code is identical.
@@ -189,7 +193,8 @@ def stage_chain(digest: Optional[dict]) -> List[str]:
 
 
 def binary_stage(digest: Optional[dict]) -> str:
-    """The backend's final (binary) stage: cubin on NVIDIA, hgbin on PPU."""
+    """The backend's final (binary) stage: cubin on NVIDIA, hgbin on the PPU
+    backend, mcfatbin on the MetaX backend."""
     return (digest or {}).get("binary") or STAGES[-1]
 
 
@@ -236,6 +241,8 @@ def _compile_one(ttir_path: str, dest: str, stage: str) -> Optional[str]:
         ttir = Path(ttir_path)
         meta = json.loads(ttir.with_suffix(".json").read_text())
         t = meta.get("target") or {}
+        # The recorded backend decides the vendor: "cuda" on NVIDIA and the PPU
+        # compatibility layer, "maca" on MetaX.
         target = GPUTarget(t.get("backend", "cuda"), t.get("arch", 90), t.get("warp_size", 32))
         backend = make_backend(target)
         fields = backend.parse_options({}).__dict__.keys()
@@ -247,9 +254,9 @@ def _compile_one(ttir_path: str, dest: str, stage: str) -> Optional[str]:
         stages: dict = {}
         backend.add_stages(stages, options, src.language)
         # The backend decides its own chain: NVIDIA has ttir/ttgir/llir/ptx/cubin,
-        # the PPU backend ttir/ttgir/llir/hgbin. Compile and compare up to the
-        # backend's final stage, so a PPU run gates on hgbin instead of failing on
-        # a missing "ptx" stage.
+        # the PPU backend ttir/ttgir/llir/hgbin, MetaX ttir/ttgir/mlir/llir/mcfatbin.
+        # Compile and compare up to the backend's final stage, so a PPU run gates on
+        # hgbin and a MetaX run on mcfatbin instead of failing on a missing "ptx".
         names = list(stages)
         binary = names[-1] if names else ""
         stop = binary if stage == "binary" else stage
@@ -343,8 +350,9 @@ def main() -> None:
     p.add_argument("--base-env", action="append", default=[], metavar="K=V")
     p.add_argument("--stage", default="binary",
                    help="last stage to compile and compare (default %(default)s): 'binary' is "
-                        "the backend's final stage (cubin on NVIDIA, hgbin on the PPU backend), "
-                        "'ttgir' stops after make_ttgir, or name a stage of the backend")
+                        "the backend's final stage (cubin on NVIDIA, hgbin on the PPU backend, "
+                        "mcfatbin on the MetaX backend), 'ttgir' stops after make_ttgir, or name "
+                        "a stage of the backend")
     p.add_argument("--out", type=Path, default=None, help="output dir (default runs/ir_gate_<timestamp>)")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 16)
     args = p.parse_args()

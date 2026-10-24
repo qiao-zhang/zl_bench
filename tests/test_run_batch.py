@@ -130,6 +130,7 @@ def test_replay_dir(tmp_path):
 def test_smi_tool_prefers_the_override_then_what_is_installed(monkeypatch):
     monkeypatch.delenv("ZL_BENCH_SMI", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
+    monkeypatch.delenv("MACA_PATH", raising=False)
     monkeypatch.setattr(run_batch.shutil, "which",
                         lambda tool: f"/usr/bin/{tool}" if tool == "ppu-smi" else None)
     assert run_batch.smi_tool() == "ppu-smi"
@@ -139,6 +140,7 @@ def test_smi_tool_prefers_the_override_then_what_is_installed(monkeypatch):
 
 def test_smi_tool_prefers_ppu_smi_under_the_ppu_sdk(monkeypatch):
     monkeypatch.delenv("ZL_BENCH_SMI", raising=False)
+    monkeypatch.delenv("MACA_PATH", raising=False)
     monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
     monkeypatch.setattr(run_batch.shutil, "which", lambda tool: f"/usr/bin/{tool}")
     assert run_batch.smi_tool() == "ppu-smi"
@@ -146,6 +148,7 @@ def test_smi_tool_prefers_ppu_smi_under_the_ppu_sdk(monkeypatch):
 
 def test_visible_gpus_reads_ppu_smi(monkeypatch):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("MACA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(run_batch, "smi_tool", lambda: "ppu-smi")
     monkeypatch.setattr(run_batch.subprocess, "run",
                         lambda cmd, **kw: argparse.Namespace(
@@ -155,5 +158,98 @@ def test_visible_gpus_reads_ppu_smi(monkeypatch):
 
 def test_visible_gpus_without_a_tool_assumes_one_card(monkeypatch):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("MACA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(run_batch, "smi_tool", lambda: None)
     assert run_batch.visible_gpus(None) == ["0"]
+
+
+# ---------------- MetaX (MACA) ----------------
+
+MACA_SUMMARY = ("======================= MetaX System Management Interface "
+                "=======================\n"
+                "Attached GPUs                            : 8\n")
+
+
+def test_accelerator_reads_the_vendor_stack(monkeypatch):
+    for key in ("MACA_PATH", "MACA_VISIBLE_DEVICES", "PPU_SDK"):
+        monkeypatch.delenv(key, raising=False)
+    assert run_batch.accelerator() is None
+    monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
+    assert run_batch.accelerator() == "ppu"
+    monkeypatch.setenv("MACA_PATH", "/opt/maca")
+    assert run_batch.accelerator() == "metax"
+    assert run_batch.accelerator({"MACA_VISIBLE_DEVICES": "0"}) == "metax"
+
+
+def test_smi_tool_prefers_mx_smi_under_the_maca_stack(monkeypatch):
+    monkeypatch.delenv("ZL_BENCH_SMI", raising=False)
+    monkeypatch.delenv("PPU_SDK", raising=False)
+    monkeypatch.setenv("MACA_PATH", "/opt/maca")
+    monkeypatch.setattr(run_batch.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    assert run_batch.smi_tool() == "mx-smi"
+
+
+def test_visible_gpus_reads_maca_visible_devices_first(monkeypatch):
+    monkeypatch.setenv("MACA_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    assert run_batch.visible_gpus(None) == ["2", "3"]
+
+
+def test_visible_gpus_reads_the_mx_smi_summary(monkeypatch):
+    """mx-smi answers in its own query spelling, so the count also comes from
+    its `Attached GPUs: N` line (the field FlagGems' gpu_check_metax.sh reads)."""
+    monkeypatch.delenv("MACA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(run_batch, "smi_tool", lambda: "mx-smi")
+    monkeypatch.setattr(run_batch, "_smi", lambda args: MACA_SUMMARY if not args else None)
+    assert run_batch.visible_gpus(None) == [str(i) for i in range(8)]
+
+
+def test_visible_gpus_accepts_a_gpu_hash_listing(monkeypatch):
+    monkeypatch.delenv("MACA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(run_batch, "smi_tool", lambda: "mx-smi")
+    monkeypatch.setattr(run_batch, "_smi", lambda args: (
+        "GPU#0: MetaX C500\nGPU#1: MetaX C500\n" if args == ["-L"] else None))
+    assert run_batch.visible_gpus(None) == ["0", "1"]
+
+
+def _spawn_args(**kw):
+    base = dict(env={}, pythonpath=None, shape_file=None, replay_root=None, use_flagtune=0)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _capture_spawn(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(run_batch.subprocess, "Popen", lambda cmd, **kw: seen.update(kw))
+    return seen
+
+
+def test_spawn_sets_the_maca_visibility_variable_on_metax(monkeypatch, tmp_path):
+    monkeypatch.setenv("MACA_PATH", "/opt/maca")
+    monkeypatch.setenv("MACA_VISIBLE_DEVICES", "0,1")  # the caller's mask must not win
+    seen = _capture_spawn(monkeypatch)
+    case = run_batch.Case("main", "abs", "abs", "abs")
+    run_batch._spawn(case, tmp_path / "out", "3", _spawn_args(), "")
+    assert seen["env"]["MACA_VISIBLE_DEVICES"] == "3"
+    assert seen["env"]["CUDA_VISIBLE_DEVICES"] == "3"
+
+
+def test_spawn_takes_the_maca_stack_from_a_batch_env(monkeypatch, tmp_path):
+    for key in ("MACA_PATH", "MACA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(key, raising=False)
+    seen = _capture_spawn(monkeypatch)
+    case = run_batch.Case("main", "abs", "abs", "abs")
+    run_batch._spawn(case, tmp_path / "out", "2", _spawn_args(env={"MACA_PATH": "/opt/maca"}), "")
+    assert seen["env"]["MACA_VISIBLE_DEVICES"] == "2"
+
+
+def test_spawn_leaves_the_maca_variable_alone_off_metax(monkeypatch, tmp_path):
+    for key in ("MACA_PATH", "MACA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(key, raising=False)
+    seen = _capture_spawn(monkeypatch)
+    case = run_batch.Case("main", "abs", "abs", "abs")
+    run_batch._spawn(case, tmp_path / "out", "0", _spawn_args(), "")
+    assert "MACA_VISIBLE_DEVICES" not in seen["env"]
+    assert seen["env"]["CUDA_VISIBLE_DEVICES"] == "0"
