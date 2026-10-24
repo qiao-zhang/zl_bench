@@ -76,10 +76,10 @@ BUSY_REPORT_S = 300
 # another name.
 SMI_ENV = "ZL_BENCH_SMI"
 SMI_TOOLS = ("nvidia-smi", "ppu-smi", "mx-smi")
-# A vendor stack's environment variable, and the tool that ships with it. A box
-# often carries an nvidia-smi that cannot enumerate its own devices, so the
-# stack is the stronger signal than the tool order.
-SMI_VENDOR_ENV = (("PPU_SDK", "ppu-smi"), ("MACA_PATH", "mx-smi"))
+# The tool that ships with each vendor stack (see accelerator()). A box often
+# carries an nvidia-smi that cannot enumerate the devices of another vendor, so
+# the stack is the stronger signal than the tool order.
+VENDOR_SMI = {"ppu": "ppu-smi", "metax": "mx-smi"}
 # The tools do not share their query spelling: nvidia-smi takes
 # --list-gpus/--query-gpu, ppu-smi -L/--query-ppu, mx-smi follows the MACA
 # release. Try the narrower spellings first, then the NVIDIA one; a tool
@@ -273,6 +273,18 @@ def parse_env(pairs: Optional[Sequence[str]]) -> Dict[str, str]:
 
 # ---------------- GPUs ----------------
 
+def op_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The environment an op runs in: this process's, plus the batch's --env pairs.
+
+    Device enumeration, the idle check and the subprocess all read this one view,
+    so a vendor stack passed with `--env MACA_PATH=...` selects the same tool the
+    op itself runs under. ab_run.py passes each side's env, so A and B are checked
+    with their own stack."""
+    env = dict(os.environ)
+    env.update(extra or {})
+    return env
+
+
 def accelerator(env: Optional[Dict[str, str]] = None) -> Optional[str]:
     """The vendor stack in use: metax / ppu, or None when no stack marker is set
     (a plain NVIDIA box, or a caller that only sets ZL_BENCH_SMI). `env` defaults
@@ -285,33 +297,37 @@ def accelerator(env: Optional[Dict[str, str]] = None) -> Optional[str]:
     return None
 
 
-def smi_tool() -> Optional[str]:
-    """The accelerator management tool in use, or None when none is installed.
+def smi_tool(env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The accelerator management tool in use, or None when none is usable.
 
     nvidia-smi on NVIDIA, ppu-smi on the T-Head PPU, mx-smi on MetaX;
-    ZL_BENCH_SMI overrides."""
-    explicit = os.environ.get(SMI_ENV, "").strip()
+    ZL_BENCH_SMI overrides. Once the vendor stack is known, only its own tool is
+    acceptable: another vendor's tool would inspect the wrong devices, so a
+    missing tool means None (with a warning from the caller) instead of a
+    fallback. A box without a stack marker keeps the plain tool order."""
+    env = os.environ if env is None else env
+    explicit = env.get(SMI_ENV, "").strip()
     if explicit:
         return explicit
-    # A PPU or MetaX box often carries an nvidia-smi that cannot enumerate its
-    # own devices, so the vendor stack's environment is the stronger signal
-    # than the tool order.
-    for env_key, tool in SMI_VENDOR_ENV:
-        if os.environ.get(env_key) and shutil.which(tool):
-            return tool
-    return next((tool for tool in SMI_TOOLS if shutil.which(tool)), None)
+    vendor = accelerator(env)
+    expected = VENDOR_SMI.get(vendor or "")
+    if expected:
+        return expected if shutil.which(expected, path=env.get("PATH")) else None
+    return next((tool for tool in SMI_TOOLS if shutil.which(tool, path=env.get("PATH"))), None)
 
 
-def visible_gpus(arg: Optional[str]) -> List[str]:
+def visible_gpus(arg: Optional[str],
+                 env: Optional[Dict[str, str]] = None) -> List[str]:
     if arg:
         return [g.strip() for g in arg.split(",") if g.strip()]
+    env = os.environ if env is None else env
     for key in VISIBLE_ENVS:
-        env = os.environ.get(key, "").strip()
-        if env:
-            return [g.strip() for g in env.split(",") if g.strip()]
+        value = env.get(key, "").strip()
+        if value:
+            return [g.strip() for g in value.split(",") if g.strip()]
     # -L lists devices on nvidia-smi/ppu-smi; mx-smi answers in its own spelling
     # per MACA release, so fall back to its summary block.
-    n = _device_count(_smi_first(SMI_LIST_ARGS) or _smi([]) or "")
+    n = _device_count(_smi_first(SMI_LIST_ARGS, env=env) or _smi([], env=env) or "")
     return [str(i) for i in range(n)] if n else ["0"]
 
 
@@ -327,24 +343,47 @@ def _device_count(text: str) -> int:
     return int(attached.group(1)) if attached else 0
 
 
-def _smi(args: List[str]) -> Optional[str]:
-    tool = smi_tool()
+def _smi(args: List[str], env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """stdout of `<tool> --args`, or None when there is no tool or it rejects the
+    spelling (non-zero exit). "" means the query succeeded with no rows: an idle
+    accelerator lists no compute process, which is not "the tool cannot tell".
+
+    The tool runs under the same environment that selected it: a tool reached
+    through `--env PATH=...` must also find its libraries (`LD_LIBRARY_PATH`)
+    there, and a bare name must resolve against that PATH, not this process's."""
+    env = op_env(env)
+    tool = smi_tool(env)
     if tool is None:
         return None
     try:
         return subprocess.run([tool, *args], text=True, capture_output=True,
-                              timeout=30, check=True).stdout
+                              timeout=30, check=True, env=env).stdout
     except Exception:
         return None
 
 
-def _smi_first(arg_sets: Sequence[List[str]]) -> Optional[str]:
-    """First non-empty answer among the tool spellings (see SMI_*_ARGS)."""
+def _smi_first(arg_sets: Sequence[List[str]], csv_query: bool = False,
+               env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """First spelling the tool accepts, an empty answer included.
+
+    `--query-compute-apps` prints nothing when no process uses the GPU, and
+    treating that as a rejected spelling would discard the memory-based busy
+    check. `csv_query` still rejects a usage block that the tool printed with
+    exit 0: it has no CSV fields, so it is not an answer to a `--query-*`."""
     for args in arg_sets:
-        out = _smi(args)
-        if out:
-            return out
+        out = _smi(args, env)
+        if out is None:
+            continue
+        if csv_query and not _looks_like_csv(out):
+            continue
+        return out
     return None
+
+
+def _looks_like_csv(text: str) -> bool:
+    """CSV rows, or nothing at all for an empty result set."""
+    rows = [line for line in text.splitlines() if line.strip()]
+    return not rows or all("," in line for line in rows)
 
 
 def parse_gpus(text: str) -> Dict[str, Tuple[str, int]]:
@@ -371,12 +410,12 @@ def parse_compute_apps(text: str, uuid: str) -> List[str]:
     return out
 
 
-def gpu_users(gpu: str) -> Optional[List[str]]:
+def gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
     """What is using gpu (a management-tool index or a GPU uuid): its processes, or
     the memory in use when no process is listed; empty when idle, None if the tool
     cannot tell."""
-    gpus = _smi_first(SMI_GPU_ARGS)
-    apps = _smi_first(SMI_APPS_ARGS)
+    gpus = _smi_first(SMI_GPU_ARGS, csv_query=True, env=env)
+    apps = _smi_first(SMI_APPS_ARGS, csv_query=True, env=env)
     info = parse_gpus(gpus).get(gpu) if gpus else None
     if info is None or apps is None:
         return None
@@ -390,20 +429,37 @@ def gpu_users(gpu: str) -> Optional[List[str]]:
 _smi_missing_reported = threading.Event()
 
 
-def wait_for_idle_gpu(gpu: str, policy: str) -> str:
+def _no_smi_reason(env: Optional[Dict[str, str]] = None) -> str:
+    """Why the device query is impossible, for the one warning the batch prints."""
+    tool = smi_tool(env)
+    if tool is not None:
+        return (f"{tool} cannot list GPU processes "
+                "(tried -L/--query-ppu/--query-gpu and their compute-apps forms)")
+    vendor = accelerator(env)
+    expected = VENDOR_SMI.get(vendor or "")
+    if expected:
+        # The stack decided the vendor, so its own tool or none: another vendor's
+        # tool would inspect the wrong devices.
+        return (f"the {vendor} stack is in use but {expected} is not installed "
+                f"(install it or set {SMI_ENV})")
+    return (f"no accelerator management tool (install nvidia-smi, ppu-smi or mx-smi, "
+            f"or set {SMI_ENV})")
+
+
+def wait_for_idle_gpu(gpu: str, policy: str,
+                      env: Optional[Dict[str, str]] = None) -> str:
     """Hold until no other process uses gpu (policy "wait"), or only report it ("warn").
-    Returns a note for ops_status.csv: "", gpu_busy or gpu_wait=<seconds>s."""
+    Returns a note for ops_status.csv: "", gpu_busy or gpu_wait=<seconds>s.
+
+    `env` is the op's environment (see op_env), so the tool asked here is the one
+    the op itself will run under."""
     if policy == "ignore":
         return ""
-    procs = gpu_users(gpu)
+    procs = gpu_users(gpu, env)
     if procs is None:
         if not _smi_missing_reported.is_set():
             _smi_missing_reported.set()
-            tool = smi_tool()
-            reason = (f"no accelerator management tool (install nvidia-smi, ppu-smi "
-                      f"or mx-smi, or set {SMI_ENV})" if tool is None
-                      else f"{tool} cannot list GPU processes "
-                           "(tried -L/--query-ppu/--query-gpu and their compute-apps forms)")
+            reason = _no_smi_reason(env)
             print(f"{LOG} warning: {reason}; not checking that GPUs are idle", flush=True)
         return ""
     if not procs:
@@ -416,7 +472,7 @@ def wait_for_idle_gpu(gpu: str, policy: str) -> str:
     print(f"{LOG} gpu{gpu} is in use by {'; '.join(procs)}; waiting for it to be idle", flush=True)
     while procs:
         time.sleep(BUSY_POLL_S)
-        procs = gpu_users(gpu) or []
+        procs = gpu_users(gpu, env) or []
         if procs and time.time() - last >= BUSY_REPORT_S:
             last = time.time()
             print(f"{LOG} gpu{gpu} still in use ({int(last - t0)} s): {'; '.join(procs)}", flush=True)
@@ -437,7 +493,9 @@ def partition(cases: List[Case], gpus: List[str]) -> Dict[str, List[Case]]:
 
 def _spawn(case: Case, out_dir: Path, gpu: str, args: argparse.Namespace,
            dtypes: str) -> subprocess.Popen:
-    env = os.environ.copy()
+    # One view of the environment for the vendor decision here and the idle check
+    # in run_case: the caller's shell plus the batch's --env pairs.
+    env = op_env(getattr(args, "env", None))
     # The batch arguments win: same-named variables from the caller's shell must
     # not leak into run_pytest.sh. PARALLEL_WARMUP_GPUS: the batch already
     # shards across GPUs, so no per-op parallelism.
@@ -445,7 +503,6 @@ def _spawn(case: Case, out_dir: Path, gpu: str, args: argparse.Namespace,
         env.pop(key, None)
     # GPU numbers as the management tool shows them, which the idle check relies on.
     env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-    env.update(getattr(args, "env", None) or {})
     pythonpath = getattr(args, "pythonpath", None)
     if pythonpath:
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [pythonpath, env.get("PYTHONPATH")]))
@@ -509,6 +566,9 @@ def run_case(case: Case, batch_dir: Path, gpu: str,
              args: argparse.Namespace) -> Dict[str, str]:
     out_dir = batch_dir / case.repo / case.run_name
     marker = out_dir / ".complete"
+    # The same environment _spawn hands the op, so the idle check asks the tool
+    # the op will actually run under (ab_run.py passes each side's env).
+    env = op_env(getattr(args, "env", None))
 
     if args.resume and marker.is_file() and (out_dir / "run.log").is_file():
         row = _classify(case, out_dir, gpu, 0, 0, "", timed_out=False)
@@ -529,7 +589,7 @@ def run_case(case: Case, batch_dir: Path, gpu: str,
             log = out_dir / "run.log"
             if log.is_file():
                 log.rename(out_dir / f"run.attempt{attempt - 1}.log")
-        notes = _join(notes, wait_for_idle_gpu(gpu, getattr(args, "busy_gpu", "ignore")))
+        notes = _join(notes, wait_for_idle_gpu(gpu, getattr(args, "busy_gpu", "ignore"), env))
         rc, timed_out = _wait(_spawn(case, out_dir, gpu, args, dtypes),
                               args.op_timeout)
         rcs.append(rc)
@@ -557,7 +617,7 @@ def run_case(case: Case, batch_dir: Path, gpu: str,
             if log.is_file():
                 log.rename(out_dir / f"run.attempt{len(rcs) - 1}.log")
             notes = _join(notes, "dtype_rescue",
-                          wait_for_idle_gpu(gpu, getattr(args, "busy_gpu", "ignore")))
+                          wait_for_idle_gpu(gpu, getattr(args, "busy_gpu", "ignore"), env))
             rc, timed_out = _wait(_spawn(case, out_dir, gpu, args, ""),
                                   args.op_timeout)
             rcs.append(rc)
@@ -668,7 +728,7 @@ def main() -> None:
     if not cases:
         raise SystemExit(f"{LOG} the selection is empty")
 
-    gpus = visible_gpus(args.gpus)
+    gpus = visible_gpus(args.gpus, op_env(args.env))
     batch_dir = (args.batch_dir or
                  ZL_BENCH / "runs" / f"batch_{datetime.now():%Y%m%d-%H%M%S}")
     batch_dir = batch_dir.resolve()

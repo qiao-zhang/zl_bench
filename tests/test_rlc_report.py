@@ -26,20 +26,23 @@ def _table(tmp_path):
 
 
 def test_parse_cell_reads_the_display_name_and_inventory_op():
-    assert rlc_ops.parse_cell("kron") == ("kron", "main", "kron", None, False)
-    assert rlc_ops.parse_cell("outer\nvllm:outer") == ("outer", "vllm", "outer", None, True)
+    assert rlc_ops.parse_cell("kron") == ("kron", "", "kron", None)
+    assert rlc_ops.parse_cell("outer\nvllm:outer") == ("outer", "vllm", "outer", None)
     # the table's label and the inventory op differ for two tests that share a label
     assert rlc_ops.parse_cell("uniform_\nmain:uniform_inplace") == \
-        ("uniform_", "main", "uniform_inplace", None, True)
-    assert rlc_ops.parse_cell("x\nmain:y@z") == ("x", "main", "y", "z", True)
-    assert rlc_ops.parse_cell("vllm:foo") == ("vllm:foo", "vllm", "foo", None, True)
+        ("uniform_", "main", "uniform_inplace", None)
+    assert rlc_ops.parse_cell("x\nmain:y@z") == ("x", "main", "y", "z")
+    assert rlc_ops.parse_cell("vllm:foo") == ("vllm:foo", "vllm", "foo", None)
+    # a single line carries the same `[repo:]op[@op_file]` spec as the second line
+    assert rlc_ops.parse_cell("main:kron@kron") == ("main:kron@kron", "main", "kron", "kron")
+    assert rlc_ops.parse_cell("kron@kron") == ("kron@kron", "", "kron", "kron")
     assert rlc_ops.parse_cell("") is None
 
 
 def test_read_table_skips_the_title_and_header_rows(tmp_path):
     entries = rlc_ops.read_table(_table(tmp_path))
     assert [(e.display, e.repo, e.op) for e in entries] == [
-        ("kron", "main", "kron"),
+        ("kron", "", "kron"),
         ("outer", "vllm", "outer"),
         ("uniform_", "main", "uniform_inplace"),
     ]
@@ -203,6 +206,44 @@ def test_resolve_records_an_op_missing_from_both_repos(monkeypatch, tmp_path):
     assert not errors  # recorded, not fatal
 
 
+def test_resolve_pins_one_op_file_from_the_first_line(monkeypatch, tmp_path):
+    """`main:kron@kron` on a single line is the same spec as the two-line form:
+    it must pin that benchmark file instead of being read as an op named
+    `kron@kron`, and `kron@kron` must pin it in both repos."""
+    inv = {"main": [{"op": "kron", "op_file": "kron", "collected": "yes"},
+                    {"op": "kron", "op_file": "kron_other", "collected": "yes"}],
+           "vllm": [{"op": "kron", "op_file": "kron", "collected": "yes"}]}
+    monkeypatch.setattr(rlc_ops.run_batch, "load_inventory", lambda: inv)
+
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "main:kron@kron")))
+    assert specs == ["main:kron@kron"]
+    assert [r["status"] for r in report] == ["main"]
+    assert not errors
+
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "kron\nmain:kron@kron")))
+    assert specs == ["main:kron@kron"]
+    assert not errors
+
+    # no repo prefix: the pinned file is looked up in both repos
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "kron@kron")))
+    assert specs == ["main:kron@kron", "vllm:kron@kron"]
+    assert [r["status"] for r in report] == ["both", "both"]
+    assert not errors
+
+
+def test_resolve_reports_a_pinned_op_file_that_is_missing(monkeypatch, tmp_path):
+    inv = {"main": [{"op": "kron", "op_file": "kron", "collected": "yes"}]}
+    monkeypatch.setattr(rlc_ops.run_batch, "load_inventory", lambda: inv)
+    specs, report, errors = rlc_ops.resolve(rlc_ops.read_table(
+        _one_op_table(tmp_path, "main:kron@nope")))
+    assert specs == []
+    assert errors == ["line 2: no main:kron@nope in the inventory"]
+    assert report == [{"line": 2, "display": "main:kron@nope", "repo": "main",
+                       "op": "kron", "op_file": "nope", "status": "missing"}]
+
 
 def test_resolve_matches_the_benchmark_op_name(monkeypatch, tmp_path):
     inv = {"main": [{"op": "perf_fft", "op_file": "fft", "op_names": "fft",
@@ -270,6 +311,27 @@ def test_display_name_marks_multi_and_both(tmp_path):
     assert rlc_report.display_name("main:outer@outer", {"outer": 2}, {}) == \
         "outer\nmain:outer@outer"
     assert rlc_report.display_name("main:kron@kron", {"kron": 1}, {}) == "kron"
+
+
+def test_display_name_keeps_the_op_file_for_one_name_in_several_files():
+    """Two benchmark files with one op name (the `multi` case) must stay apart:
+    the second line names the table row both were expanded from, so without the
+    op_file on the first line the two rows read exactly the same."""
+    sources = {
+        "main:perf_router_gemm@blas_perf_parallel": {"display": "router_gemm",
+                                                     "status": "multi"},
+        "main:perf_router_gemm@router_gemm": {"display": "router_gemm", "status": "multi"},
+    }
+    op_files = {("main", "perf_router_gemm"): {"blas_perf_parallel", "router_gemm"}}
+    a = rlc_report.display_name("main:perf_router_gemm@blas_perf_parallel", {}, sources, op_files)
+    b = rlc_report.display_name("main:perf_router_gemm@router_gemm", {}, sources, op_files)
+    assert a == "perf_router_gemm@blas_perf_parallel\nrouter_gemm · main · multi"
+    assert b == "perf_router_gemm@router_gemm\nrouter_gemm · main · multi"
+    assert a != b
+    # one file per op name keeps the plain first line
+    assert rlc_report.display_name("main:kron@kron", {}, {}, {("main", "kron"): {"kron"}}) == "kron"
+    assert rlc_report.display_name("main:kron@kron", {"kron": 2}, {},
+                                   {("main", "kron"): {"kron"}}) == "kron\nmain:kron@kron"
 
 
 def test_load_sources_reads_the_provenance_csv(tmp_path):

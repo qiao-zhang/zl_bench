@@ -89,8 +89,9 @@ def parse_args() -> argparse.Namespace:
 
     e = p.add_argument_group("execution")
     e.add_argument("--gpus", default=None,
-                   help="comma-separated GPU list (default: MACA_VISIBLE_DEVICES / "
-                          "CUDA_VISIBLE_DEVICES, else every device the SMI tool lists)")
+                   help="comma-separated GPU list (default: the sides' own environment, "
+                        "MACA_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES, else every device their "
+                        "SMI tool lists; both sides must see the same cards)")
     e.add_argument("--dtypes", default="", help='dtype whitelist, e.g. "bfloat16 float16"')
     e.add_argument("--shape-file", type=Path, default=None,
                    help="shape set (default: the record's archived shapes.yaml per op)")
@@ -118,7 +119,21 @@ def parse_args() -> argparse.Namespace:
     if args.sides["a"]["pythonpath"] == args.sides["b"]["pythonpath"] and \
             args.sides["a"]["env"] == args.sides["b"]["env"]:
         print(f"{LOG} note: both sides are identical, this measures the noise floor", flush=True)
+    stacks = side_stacks(args.sides)
+    if len(set(stacks.values())) > 1:
+        shown = ", ".join(f"{side.upper()}={stacks[side] or 'plain cuda'}" for side in SIDES)
+        print(f"{LOG} warning: the sides run on different device stacks ({shown}); "
+              "the gap would mix the stacks, not just the compiler switch", flush=True)
     return args
+
+
+def side_stacks(sides: Dict[str, dict]) -> Dict[str, str]:
+    """Each side's device stack (run_batch.accelerator), read from that side's env.
+
+    The idle check and the subprocess use the same per-side environment, so a side
+    that sets MACA_PATH / PPU_SDK is checked with its own vendor's tool."""
+    return {side: run_batch.accelerator(run_batch.op_env(cfg["env"])) or ""
+            for side, cfg in sides.items()}
 
 
 # ---------------- manifest ----------------
@@ -276,6 +291,30 @@ class Runner:
             batch_summary.summarize(self.args.out / batch)
 
 
+def auto_gpus(args: argparse.Namespace) -> List[str]:
+    """The GPU list both sides run on.
+
+    `--gpus` wins. Otherwise the sides' own environments decide (their
+    MACA_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES, or the device count their SMI
+    tool reports), because the sides are what the ops run under: the parent
+    shell's visibility variable must not silently win. Two sides that see
+    different sets of cards are an error -- A and B have to measure on the same
+    ones; a different order is not, since every op is pinned to a single card,
+    so the A side's order is kept."""
+    if args.gpus:
+        return run_batch.visible_gpus(args.gpus)
+    per_side = {side: run_batch.visible_gpus(None, run_batch.op_env(cfg["env"]))
+                for side, cfg in args.sides.items()}
+    # Compare the sets (and the counts, so a repeated index still counts):
+    # `MACA_VISIBLE_DEVICES=2,3` and `3,2` are the same two cards.
+    seen = {(frozenset(gpus), len(gpus)) for gpus in per_side.values()}
+    if len(seen) > 1:
+        shown = ", ".join(f"{side.upper()}={per_side[side]}" for side in SIDES)
+        raise SystemExit(f"{LOG} the sides see different GPUs ({shown}); "
+                         "pass --gpus to pin the list")
+    return list(per_side[SIDES[0]])
+
+
 def undecided_runs(args: argparse.Namespace) -> set:
     """<repo>/<run_name> of the ops with an undecided row (a changed row when --gate is
     given)."""
@@ -289,7 +328,7 @@ def main() -> None:
     if not cases:
         raise SystemExit(f"{LOG} the selection is empty")
     check_manifest(args)
-    gpus = run_batch.visible_gpus(args.gpus)
+    gpus = auto_gpus(args)
     print(f"{LOG} {len(cases)} ops, {len(gpus)} GPUs, out={args.out}", flush=True)
     for side in SIDES:
         cfg = args.sides[side]

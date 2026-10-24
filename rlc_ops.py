@@ -15,6 +15,8 @@ benchmark's `op_name`, then the op_file): when only one repo has it, that one
 runs; when both have it, both run (main first) and the sidecar report marks the
 pair `both`; when neither has it, the line is written as a `# UNRESOLVED`
 comment in the ops file and recorded in the report instead of failing the run.
+A trailing `@op_file` pins one benchmark file and is honoured on the first line
+as well (`main:kron@kron`, `kron@kron`), not only on the second.
 
 Usage:
   python rlc_ops.py --table ops/rlc_table.csv --out ops/rlc_ops.txt
@@ -24,8 +26,8 @@ Usage:
 `--report` (default ops/rlc_ops_sources.csv) records every line as
 `main` / `vllm` / `both` / `multi` / `missing`, so the provenance of each op is
 auditable. A name that matches several tests is expanded to every match, marked
-`multi`, so the batch runs all of them; add `@op_file` (or a `repo:op` second
-line) to run just one.
+`multi`, so the batch runs all of them; add `@op_file` (on either line, with or
+without a `repo:` prefix) to run just one.
 """
 
 from __future__ import annotations
@@ -48,37 +50,34 @@ Match = Tuple[str, str]  # (inventory op, op_file)
 class Entry(NamedTuple):
     line: int
     display: str
-    repo: str
+    repo: str  # "" when the cell named none: resolve() searches both repos
     op: str
     op_file: Optional[str]
-    explicit: bool  # the cell named a repo (or an op_file), so do not search both
 
 
-def parse_cell(cell: str) -> Optional[Tuple[str, str, str, Optional[str], bool]]:
-    """(display, repo, op, op_file, explicit) of one 算子 cell.
+def parse_cell(cell: str) -> Optional[Tuple[str, str, str, Optional[str]]]:
+    """(display, repo, op, op_file) of one 算子 cell.
 
     The first line is the table's display name; the optional second line is the
-    inventory's `repo:op`. A trailing `@op_file` is accepted for an op that
-    appears in several benchmark files. Without a second line (and without a
-    `repo:` in the first), the entry is left unqualified and resolve() searches
-    both repos."""
+    inventory's `repo:op`. A trailing `@op_file` is accepted on either line, and
+    on the first line alone, for an op that appears in several benchmark files:
+    it pins that file instead of running every match. Without a repo the entry
+    is left unqualified and resolve() searches both repos."""
     lines = [ln.strip() for ln in cell.splitlines() if ln.strip()]
     if not lines:
         return None
     display = lines[0]
-    repo, op, op_file, explicit = "main", display, None, False
+    repo, spec = "", lines[1] if len(lines) > 1 else display
     if len(lines) > 1:
-        spec = lines[1]
-        repo, sep, rest = spec.partition(":")
-        if not sep or not repo or not rest:
-            raise ValueError(f"expected `repo:op` on the second line, got {spec!r}")
-        op, _, op_file = rest.partition("@")
-        op_file = op_file or None
-        explicit = True
-    elif ":" in display:
-        repo, _, op = display.partition(":")
-        explicit = True
-    return display, repo, op, op_file, explicit
+        repo, sep, spec = spec.partition(":")
+        if not sep or not repo or not spec:
+            raise ValueError(f"expected `repo:op` on the second line, got {lines[1]!r}")
+    elif ":" in spec:
+        repo, _, spec = spec.partition(":")
+        if not repo or not spec:
+            raise ValueError(f"expected `repo:op`, got {display!r}")
+    op, _, op_file = spec.partition("@")
+    return display, repo, op, op_file or None
 
 
 def read_table(path: Path) -> List[Entry]:
@@ -100,8 +99,8 @@ def read_table(path: Path) -> List[Entry]:
         parsed = parse_cell(cell)
         if parsed is None:
             continue
-        display, repo, op, op_file, explicit = parsed
-        out.append(Entry(i, display, repo, op, op_file, explicit))
+        display, repo, op, op_file = parsed
+        out.append(Entry(i, display, repo, op, op_file))
     return out
 
 
@@ -162,37 +161,32 @@ def resolve(entries: List[Entry]) -> Tuple[List[str], List[dict], List[str]]:
         for match in matches:
             add(entry, repo, match, status)
 
+    def candidates(entry: Entry, repo: str) -> List[Match]:
+        matches = _candidates(repo, entry.op, by_op, by_name, by_file)
+        if entry.op_file:  # the cell pins one benchmark file
+            matches = [m for m in matches if m[1] == entry.op_file]
+        return matches
+
     for e in entries:
-        if e.op_file:
-            matches = sorted({m for m in _candidates(e.repo, e.op, by_op, by_name, by_file)
-                              if m[1] == e.op_file})
-            if not matches:
-                errors.append(f"line {e.line}: no {e.repo}:{e.op}@{e.op_file} in the inventory")
-                report.append({"line": e.line, "display": e.display, "repo": e.repo,
-                               "op": e.op, "op_file": e.op_file, "status": "missing"})
-            else:
-                expand(e, e.repo, matches, "multi" if len(matches) > 1 else e.repo)
-            continue
-
-        if e.explicit:
-            matches = _candidates(e.repo, e.op, by_op, by_name, by_file)
-            if not matches:
-                errors.append(f"line {e.line}: no {e.repo}:{e.op} in the inventory")
-                report.append({"line": e.line, "display": e.display, "repo": e.repo,
-                               "op": e.op, "op_file": "", "status": "missing"})
-            else:
-                expand(e, e.repo, matches, "multi" if len(matches) > 1 else e.repo)
-            continue
-
-        # No repo in the table: search both.
-        found = {repo: _candidates(repo, e.op, by_op, by_name, by_file)
-                 for repo in ("main", "vllm")}
-        present = {repo: matches for repo, matches in found.items() if matches}
+        # "" (no repo in the cell) searches both; an op_file pins one benchmark
+        # file in whichever repos have it.
+        repos = [e.repo] if e.repo else ["main", "vllm"]
+        present: Dict[str, List[Match]] = {}
+        for repo in repos:
+            matches = candidates(e, repo)
+            if matches:
+                present[repo] = matches
         if not present:
-            print(f"{LOG} line {e.line}: {e.display} is in neither main nor vllm; "
-                  "recorded as unresolved", file=sys.stderr)
-            report.append({"line": e.line, "display": e.display, "repo": "",
-                           "op": e.op, "op_file": "", "status": "missing"})
+            spec = f"{e.repo}:{e.op}" if e.repo else e.op
+            if e.op_file:
+                spec += f"@{e.op_file}"
+            if e.repo:
+                errors.append(f"line {e.line}: no {spec} in the inventory")
+            else:
+                print(f"{LOG} line {e.line}: {e.display} is in neither main nor vllm; "
+                      "recorded as unresolved", file=sys.stderr)
+            report.append({"line": e.line, "display": e.display, "repo": e.repo,
+                           "op": e.op, "op_file": e.op_file or "", "status": "missing"})
             continue
         multi = any(len(matches) > 1 for matches in present.values())
         status = "multi" if multi else ("both" if len(present) == 2 else next(iter(present)))

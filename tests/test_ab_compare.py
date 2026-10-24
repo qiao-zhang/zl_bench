@@ -28,6 +28,17 @@ def test_nocg_tables():
     assert ab_compare.nocg_tables(text) == {("softmax", "torch.bfloat16")}
 
 
+def test_nocg_tables_marks_every_table_of_a_process_wide_fallback():
+    """`phase=disabled` / `phase=capability` are reported once per process (one
+    process, one op), so every table of that run.log used plain do_bench, not
+    just the first one."""
+    for phase in ("disabled", "capability"):
+        text = (f"BENCHMARK_DIRECT_NO_CUDAGRAPH op=softmax phase={phase} reason=X\n"
+                + _log([0.1]) + HEADER.replace("bfloat16", "float16"))
+        assert ab_compare.nocg_tables(text) == {("softmax", "torch.bfloat16"),
+                                                ("softmax", "torch.float16")}
+
+
 def test_parse_range():
     assert ab_compare.parse_range(None) is None
     assert ab_compare.parse_range("7-12") == (7, 12)

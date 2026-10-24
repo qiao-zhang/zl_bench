@@ -35,7 +35,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 LOG = "[rlc-report]"
 DTYPE_GROUPS = (
@@ -324,17 +324,24 @@ def load_sources(path: Optional[Path]) -> Dict[str, dict]:
 
 
 def display_name(label: str, op_names: Dict[str, int],
-                 sources: Optional[Dict[str, dict]] = None) -> str:
+                 sources: Optional[Dict[str, dict]] = None,
+                 op_files: Optional[Dict[Tuple[str, str], Set[str]]] = None) -> str:
     """`repo:op@op_file` -> the table's row label, plus a second line when the
     op needs distinguishing: `display · repo · multi/both` for a name that
-    expanded to several tests, or `repo:op@op_file` for same-named tests."""
+    expanded to several tests, or `repo:op@op_file` for same-named tests.
+
+    When one repo carries an op name in several benchmark files, the first line
+    carries `@op_file` too: the multi/both second line names the table row both
+    were expanded from, so without it the two rows would read the same."""
     repo, _, rest = label.partition(":")
     op, _, op_file = rest.partition("@")
+    ambiguous = len((op_files or {}).get((repo, op), ())) > 1
+    head = f"{op}@{op_file}" if ambiguous and op_file else op
     src = (sources or {}).get(label)
     if src and src.get("status") in ("multi", "both"):
         shown = (src.get("display") or op).strip()
-        return f"{op}\n{shown} · {repo} · {src['status']}"
-    return f"{op}\n{label}" if op_names.get(op, 0) > 1 else op
+        return f"{head}\n{shown} · {repo} · {src['status']}"
+    return f"{head}\n{label}" if op_names.get(op, 0) > 1 else head
 
 
 def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
@@ -464,8 +471,12 @@ def main() -> None:
     order = read_table_order(args.table, labels)
     labels.sort(key=lambda label: (order.get(label, len(order)), label))
     op_names = defaultdict(int)
+    op_files: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
     for label in labels:
-        op_names[label.partition(":")[2].partition("@")[0]] += 1
+        repo, _, rest = label.partition(":")
+        op, _, op_file = rest.partition("@")
+        op_names[op] += 1
+        op_files[(repo, op)].add(op_file)
 
     by_label: Dict[str, Dict[str, List[Row]]] = defaultdict(dict)
     for g in groups:
@@ -481,7 +492,7 @@ def main() -> None:
         saving = max((r.a_ms - r.b_ms for r in all_rows), default=0.0)
         cost = max((r.b_ms - r.a_ms for r in all_rows), default=0.0)
         note = "；".join(dict.fromkeys(s["note"] for s in stats.values() if s["note"]))
-        out.append({"name": display_name(label, op_names, sources), "label": label,
+        out.append({"name": display_name(label, op_names, sources, op_files), "label": label,
                     "rows": len(all_rows), "groups": stats,
                     "saving": max(saving, 0.0), "cost": max(cost, 0.0), "note": note})
 

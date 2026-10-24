@@ -50,6 +50,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -62,6 +63,12 @@ from batch_summary import OPERATOR_HEADER_RE, parse_run_log
 NOCG = "BENCHMARK_DIRECT_NO_CUDAGRAPH"
 FALLBACK = "AUTOTUNE_REPLAY_FALLBACK"
 MANIFEST = "ab.json"
+# Fallback phases the plugin reports once per process (one process, one op), so
+# they hold for every table of that op: NO_CUDAGRAPH_OPS turns graph timing off
+# by name, and a backend without the graph API never attempts a capture. The
+# per-measurement phases (host_sync, warmup, capture, sync) mark one table.
+_NOCG_PHASE_RE = re.compile(r"\bphase=(\w+)")
+_NOCG_PROCESS_PHASES = frozenset({"capability", "disabled"})
 
 Key = Tuple[str, str, int]  # (table op_name, dtype, row index)
 
@@ -93,17 +100,26 @@ def load_rows(run_dir: Path) -> Dict[Key, Tuple[float, str]]:
 
 
 def nocg_tables(text: str) -> set:
-    """(op_name, dtype) of the tables with a row timed by plain do_bench: the fallback
-    marker is printed while the table's rows are measured, before its header."""
-    out, pending = set(), 0
+    """(op_name, dtype) of the tables with a row timed by plain do_bench.
+
+    A per-measurement fallback marker is printed while its table's rows are
+    measured, before that table's header, so it marks the header that follows.
+    A process-wide one (`phase=capability`, `phase=disabled`) is printed once for
+    the whole op -- the plugin reports it on the first measurement and stays
+    quiet -- so it marks every table of that run.log, not just the first."""
+    out, pending, process_wide = set(), 0, False
     for line in text.splitlines():
         s = line.strip()
         if NOCG in s:
-            pending += 1
+            phase = _NOCG_PHASE_RE.search(s)
+            if phase and phase.group(1) in _NOCG_PROCESS_PHASES:
+                process_wide = True
+            else:
+                pending += 1
             continue
         h = OPERATOR_HEADER_RE.match(s)
         if h:
-            if pending:
+            if pending or process_wide:
                 out.add((h.group("name"), h.group("dtype").strip()))
             pending = 0
     return out
