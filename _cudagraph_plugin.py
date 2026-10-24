@@ -55,6 +55,17 @@ _GRAPH_APIS = ("CUDAGraph", "graph", "Stream", "Event", "synchronize", "current_
 _GRAPH_UNSUPPORTED = ""  # set once the mechanism itself is missing (graph_missing_api /
                          # _graph_mechanism_error); empty = try graphs
 _unsupported_reported = False
+# Operators whose capture crashes the process (a segfault cannot be caught and
+# turned into the do_bench fallback) can be listed here, comma separated, to go
+# straight to do_bench: NO_CUDAGRAPH_OPS=lstm,foo
+_DISABLE_ENV = "NO_CUDAGRAPH_OPS"
+_disabled_reported = False
+
+
+def graph_disabled(op: str) -> bool:
+    """True when op matches one of the names in NO_CUDAGRAPH_OPS (substring)."""
+    names = [n.strip() for n in os.environ.get(_DISABLE_ENV, "").split(",") if n.strip()]
+    return any(name in op for name in names)
 
 
 def _missing_graph_api(torch_module) -> str:
@@ -370,9 +381,17 @@ def _report_direct(op: str, phase: str, failure) -> None:
 def _patched_do_bench(fn, warmup=25, rep=100, grad_to_none=None,
                       quantiles=None, return_mode="mean"):
     """Drop-in replacement for triton.testing.do_bench using CUDA-graph timing."""
-    global _GRAPH_UNSUPPORTED, _unsupported_reported
+    global _GRAPH_UNSUPPORTED, _unsupported_reported, _disabled_reported
     op = os.environ.get("FLAGGEMS_PERF_CURRENT_OP", "<unknown>")
     fn = _timing_scope.timed(fn)  # its launches are the measurement's (_ir_dump_plugin)
+    # A capture that segfaults cannot be caught; such ops are opted out by name
+    # and timed with plain do_bench (the marker says phase=disabled).
+    if graph_disabled(op):
+        if not _disabled_reported:
+            _disabled_reported = True
+            _report_direct(op, "disabled", ("Disabled", f"{_DISABLE_ENV} matched {op}"))
+        return _ORIGINAL_DO_BENCH(fn, warmup=warmup, rep=rep, grad_to_none=grad_to_none,
+                                  quantiles=quantiles, return_mode=return_mode)
     # A backend without the graph API (or one that already rejected a capture in
     # this process) goes straight to do_bench: the capture could not work, and
     # every shape would pay for finding that out.

@@ -279,6 +279,7 @@ WARNING 1 config key(s) got different winners across shards — parallel interfe
 | `USE_FLAGTUNE` | `0` | `1` 使用 FlagTune 扩展调优空间（首跑全量搜索，很慢）；A/B 两侧须相同 |
 | `PARALLEL_WARMUP_GPUS` | 空：串行 | 把 autotune sweep 分到 N（≥2）张卡上 |
 | `GRAPH_MAX_CALLS` | `1000` | 一张 CUDA graph 里最多展开的调用次数；`0` 表示不设上限（[详情](docs/design.zh-CN.md#graph-大小)） |
+| `NO_CUDAGRAPH_OPS` | 空 | 逗号分隔的算子名；命中的算子直接走 `do_bench`，不尝试 capture。用于 capture 会段错误、Python 无法回退的算子（如 `lstm`），日志标记 `phase=disabled` |
 | `OUT_DIR` | `runs/<op>_<时间戳>` | 产物目录 |
 | `FLAGGEMS_PERF_COLOR` | 空：按 tty 判断 | `always`/`never` 控制终端颜色；`run.log` 始终是纯文本 |
 

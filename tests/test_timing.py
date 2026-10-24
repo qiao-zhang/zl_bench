@@ -94,3 +94,24 @@ def test_platform_without_the_graph_api_calls_do_bench_directly(monkeypatch, cap
     out = capsys.readouterr().out
     assert out.count("BENCHMARK_DIRECT_NO_CUDAGRAPH") == 1  # marker printed once per op
     assert "phase=capability" in out
+
+
+def test_graph_disabled_matches_names(monkeypatch):
+    monkeypatch.setenv("NO_CUDAGRAPH_OPS", "lstm, foo")
+    assert cg.graph_disabled("lstm")
+    assert cg.graph_disabled("main:lstm")
+    assert cg.graph_disabled("foo")
+    assert not cg.graph_disabled("mm")
+
+
+def test_disabled_op_goes_straight_to_do_bench(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setenv("NO_CUDAGRAPH_OPS", "lstm")
+    monkeypatch.setenv("FLAGGEMS_PERF_CURRENT_OP", "lstm")
+    monkeypatch.setattr(cg, "_ORIGINAL_DO_BENCH", lambda fn, **kw: calls.append(kw) or 1.0)
+    monkeypatch.setattr(cg, "_disabled_reported", False)
+    monkeypatch.setattr(cg, "_GRAPH_UNSUPPORTED", "")
+    assert cg._patched_do_bench(lambda: None) == 1.0
+    assert len(calls) == 1
+    out = capsys.readouterr().out
+    assert "phase=disabled" in out

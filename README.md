@@ -279,6 +279,7 @@ With no conflicts the configs can be trusted; with many, rerun without `PARALLEL
 | `USE_FLAGTUNE` | `0` | `1` uses the FlagTune expanded tuning space (slow full search on first run); same value on both A/B sides |
 | `PARALLEL_WARMUP_GPUS` | empty: serial | shard the autotune sweep across N (≥2) GPUs |
 | `GRAPH_MAX_CALLS` | `1000` | most calls unrolled into one CUDA graph; `0` = no cap ([details](docs/design.md#graph-size)) |
+| `NO_CUDAGRAPH_OPS` | empty | comma-separated op names that skip CUDA-graph timing and go straight to `do_bench`; for ops whose capture segfaults (a segfault cannot be caught), e.g. `lstm`; the log marks `phase=disabled` |
 | `OUT_DIR` | `runs/<op>_<timestamp>` | output dir |
 | `FLAGGEMS_PERF_COLOR` | empty: auto by tty | `always`/`never` for terminal color; `run.log` is always plain |
 

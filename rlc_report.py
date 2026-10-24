@@ -145,6 +145,8 @@ def describe_do_bench(phase: str, reason: str) -> str:
         return "平台无 graph API"
     if phase == "sync":
         return "测量前同步失败"
+    if phase == "disabled":
+        return "capture 已禁用"
     if phase == "warmup" and reason == "OutOfResources":
         return "预热显存不足"
     return f"{phase} 失败: {reason}"
