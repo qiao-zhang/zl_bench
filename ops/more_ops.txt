@@ -1,0 +1,495 @@
+# 与 ops/key_ops.txt 同一格式：<repo>:<op>@<op_file>，可直接作 run_batch.py --ops-file
+#   repo     main = FlagGems，vllm = FlagGems-vllm（与 zl_bench 同一 parent 的两个 checkout）
+#   op       benchmark 里的 test 函数名去掉 test_（run_pytest.sh 的 OP）
+#   op_file  文件名去掉 test_ 与 .py，子目录保留（test_FLA/xxx -> FLA/xxx），
+#            同名 op 分散在多个文件时靠它消歧
+# 一个算子对应多个 benchmark 时全部列出。
+
+# kron
+main:kron@kron
+
+# replication_pad3d
+main:replication_pad3d@replication_pad3d
+
+# _batch_norm_with_update
+main:batch_norm_with_update@batch_norm_with_update
+
+# addmv
+#   备注：addmv_benchmark 是 blas_perf_parallel 里的 blas 版，op_file 为 blas_perf_parallel
+main:addmv@addmv
+main:addmv_benchmark@blas_perf_parallel
+vllm:addmv_benchmark@blas_perf_parallel
+
+# addmv_
+main:addmv_@addmv_
+
+# addmv_out
+main:addmv_out@addmv
+
+# col2im
+main:col2im@col2im
+
+# native_batch_norm_legit_out
+main:native_batch_norm_legit_out@native_batch_norm_legit
+
+# native_batch_norm_legit_no_stats_out
+main:native_batch_norm_legit_no_stats_out@native_batch_norm_legit
+
+# batch_norm_impl_index
+main:_batch_norm_impl_index@batch_norm_impl_index
+
+# batch_norm
+main:batch_norm@batch_norm
+
+# batch_norm_with_update_functional
+main:_batch_norm_with_update_functional@batch_norm_with_update_functional
+
+# native_batch_norm_legit_functional
+main:native_batch_norm_legit_functional@native_batch_norm_legit_functional
+
+# native_batch_norm_legit
+#   备注：test_native_batch_norm_legit.py 的 4 个 test（native_batch_norm_legit /
+#          _out / _no_stats / _no_stats_out）同文件，op_file 相同，靠 op 名区分
+main:native_batch_norm_legit@native_batch_norm_legit
+
+# miopen_batch_norm
+main:miopen_batch_norm@miopen_batch_norm
+
+# native_batch_norm
+main:native_batch_norm@batch_norm
+
+# native_batch_norm_legit_no_stats
+main:native_batch_norm_legit_no_stats@native_batch_norm_legit
+
+# max_pool2d_backward
+main:max_pool2d_backward@max_pool2d
+
+# max_pool2d_with_indices_backward
+main:max_pool2d_with_indices_backward@max_pool2d
+
+# outer
+#   备注：mv_and_outer_benchmark 在同一文件里同时测 mv 与 outer
+main:mv_and_outer_benchmark@blas_perf_parallel
+main:outer@outer
+vllm:mv_and_outer_benchmark@blas_perf_parallel
+vllm:outer@outer
+
+# flip
+main:flip@flip
+
+# fft
+#   备注：inventory 命名为 fft（test_fft.py 里的 test_perf_fft）
+main:perf_fft@fft
+
+# beam_search_score
+main:beam_search_score@beam_search_score
+vllm:beam_search_score@beam_search_score
+
+# router_gemm
+main:perf_router_gemm@blas_perf_parallel
+main:perf_router_gemm@router_gemm
+vllm:perf_router_gemm@blas_perf_parallel
+vllm:perf_router_gemm@router_gemm
+
+# beam_search_score_
+main:beam_search_score_@beam_search_score
+vllm:beam_search_score_@beam_search_score
+
+# masked_select
+main:masked_select@masked_select
+
+# angle
+main:angle@angle
+
+# masked_scatter_backward
+main:masked_scatter_backward@masked_scatter_backward
+
+# argsort
+main:argsort@argsort
+
+# upsample_nearest_exact3d_backward
+main:upsample_nearest_exact3d_backward@upsample_nearest_exact3d_backward
+
+# upsample_nearest_exact3d_backward_grad_input
+main:upsample_nearest_exact3d_backward_grad_input@upsample_nearest_exact3d_backward
+
+# topk
+#   备注：vllm 无同名算子（仅有 topk_softmax / top_k_per_row_* / persistent_topk）
+main:topk@topk
+
+# reflection_pad2d_backward
+main:reflection_pad2d_backward@reflection_pad2d_backward
+
+# post_layer_norm_residual
+main:post_layer_norm_residual@post_layer_norm_residual
+
+# upsample_bilinear2d_aa_backward
+main:upsample_bilinear2d_aa_backward@upsample_bilinear2d_aa_backward
+
+# alpha_dropout
+main:alpha_dropout@alpha_dropout
+
+# alpha_dropout_
+main:alpha_dropout_@alpha_dropout_
+
+# bernoulli
+main:bernoulli@bernoulli
+
+# max_pool2d_with_indices
+main:max_pool2d_with_indices@max_pool2d
+
+# topk_softmax
+main:topk_softmax@topk_softmax
+vllm:topk_softmax@topk_softmax
+
+# poisson
+main:poisson@poisson
+
+# rrelu_with_noise_
+main:rrelu_with_noise_inplace@rrelu_with_noise
+
+# rrelu_with_noise
+main:rrelu_with_noise@rrelu_with_noise
+
+# rrelu__training
+main:rrelu__training@rrelu_
+
+# upsample_trilinear3d_backward
+main:upsample_trilinear3d_backward@upsample_trilinear3d_backward
+
+# dropout
+main:dropout@dropout
+
+# broadcast_tensors
+main:broadcast_tensors@broadcast_tensors
+
+# embedding_renorm_
+main:embedding_renorm_@embedding_renorm_
+
+# im2col
+main:im2col@im2col
+
+# pad_circular
+main:pad_circular@pad_circular
+
+# fused_recurrent_gated_delta_rule
+main:perf_fused_recurrent_gated_delta_rule@FLA/test_fused_recurrent_gated_delta_rule_perf
+vllm:perf_fused_recurrent_gated_delta_rule@FLA/test_fused_recurrent_gated_delta_rule_perf
+
+# sort
+main:perf_sort@sort
+
+# sort_stable
+main:perf_sort_stable@sort
+
+# dropout_
+main:dropout_@dropout_
+
+# amax
+main:amax@amax
+
+# upsample_bilinear2d_aa
+main:upsample_bilinear2d_aa@upsample_bilinear2d_aa
+
+# max
+#   备注：max_dim（aten::max.dim）另有 benchmark，本清单未列
+main:max@max
+
+# min
+#   备注：min_dim（aten::min.dim）另有 benchmark，本清单未列
+main:min@min
+
+# randint_like
+main:randint_like@randint_like
+
+# upsample_nearest3d_backward_grad_input
+main:upsample_nearest3d_backward_grad_input@upsample_nearest3d_backward
+
+# upsample_nearest3d_backward
+main:upsample_nearest3d_backward@upsample_nearest3d_backward
+
+# topk_w8a16_fp8
+#   备注：仅 main，vllm 无该变体
+main:topk_w8a16_fp8@topk_w8a16_fp8
+
+# mode
+main:perf_mode@mode
+
+# all
+main:all@all
+
+# any_dim
+#   备注：any_dims / any 是另外的 overload，本清单未列
+main:any_dim@any
+
+# all_dim
+#   备注：all_dims / all 是另外的 overload，本清单未列
+main:all_dim@all
+
+# any
+main:any@any
+
+# bernoulli_
+main:bernoulli_inplace@bernoulli
+
+# layer_norm
+main:layer_norm@layer_norm
+
+# uniform
+main:uniform@uniform
+
+# resolve_neg
+main:resolve_neg@resolve_neg
+
+# cudnn_rnn
+main:cudnn_rnn_benchmark@cudnn_rnn
+
+# uniform_
+#   备注：两个 test：uniform_inplace（test_uniform.py，op_file=uniform）与
+#          uniform_（test_uniform_.py，op_file=uniform_）
+main:uniform_inplace@uniform
+main:uniform_@uniform_
+
+# rand
+main:rand@rand
+
+# rand_like
+main:rand_like@rand_like
+
+# geometric_
+main:geometric_inplace@geometric
+
+# geometric
+main:geometric@geometric
+
+# randn
+main:randn@randn
+
+# randn_like
+main:randn_like@randn_like
+
+# grid_sample
+main:grid_sample@grid_sample
+
+# addmm_dtype
+#   备注：addmm_dtype_out（out_dtype overload）另有 benchmark，本清单未列
+main:addmm_dtype@addmm
+
+# unique_consecutive
+main:unique_consecutive@unique_consecutive
+
+# cp_gather_indexer_k_quant_cache
+#   备注：inventory 的 op 带 _benchmark 后缀
+main:cp_gather_indexer_k_quant_cache_benchmark@cp_gather_indexer_k_quant_cache
+vllm:cp_gather_indexer_k_quant_cache_benchmark@cp_gather_indexer_k_quant_cache
+
+# unique2
+main:unique2@unique
+main:perf_unique2@unique2
+
+# mkldnn_rnn_layer
+main:mkldnn_rnn_layer@mkldnn_rnn_layer
+
+# max_pool3d_with_indices
+main:perf_max_pool3d@max_pool3d
+
+# normal_tensor_tensor
+main:normal_tensor_tensor@normal
+
+# normal_float_tensor
+main:normal_float_tensor@normal
+
+# normal_tensor_float
+main:normal_tensor_float@normal
+
+# lstm
+main:lstm@lstm
+
+# normal_float_float_
+main:normal_inplace@normal
+
+# layer_norm_backward
+main:layer_norm_backward@layer_norm
+
+# addmm_out
+main:addmm_out@addmm
+
+# addmm
+main:addmm@addmm
+
+# conv_depthwise2d
+main:conv_depthwise2d@conv_depthwise2d
+
+# masked_select_backward
+main:masked_select_backward@masked_select_backward
+
+# normal_functional
+main:normal_functional@normal_functional
+
+# diagonal_copy
+main:diagonal_copy@diagonal_copy
+
+# flash_attention_forward
+main:flash_attention_forward@flash_attention_forward
+vllm:flash_attention_forward@flash_attention_forward
+
+# linear
+main:linear@linear
+
+# logit_backward
+main:logit_backward@logit_backward
+
+# log_normal_
+main:log_normal_@log_normal_
+
+# upsample_bicubic2d_aa
+main:upsample_bicubic2d_aa@upsample_bicubic2d_aa
+
+# log_normal
+main:log_normal@log_normal
+
+# fused_experts_impl
+#   备注：与 ops/key_ops.txt 一致，末行补的是 vllm 独有的 w8a16 变体
+main:fused_moe_impl_gems_vs_vllm@fused_moe
+main:fused_moe_fp8@fused_moe_fp8
+main:fused_moe_fp8_blockwise@fused_moe_fp8_blockwise
+main:fused_moe_int4_w4a16@fused_moe_int4_w4a16
+main:fused_experts_impl_int8@fused_moe_int8
+main:fused_experts_impl_int8_w8a16@fused_moe_int8_w8a16
+vllm:fused_moe_impl_gems_vs_vllm@fused_moe
+vllm:fused_moe_fp8@fused_moe_fp8
+vllm:fused_moe_fp8_blockwise@fused_moe_fp8_blockwise
+vllm:fused_moe_int4_w4a16@fused_moe_int4_w4a16
+vllm:fused_experts_impl_int8@fused_moe_int8
+vllm:fused_experts_impl_int8_w8a16@fused_moe_int8_w8a16
+
+# cudnn_convolution
+main:cudnn_convolution@cudnn_convolution
+
+# aminmax
+main:aminmax@aminmax
+
+# _flash_attention_forward
+main:_flash_attention_forward@flash_attention_forward
+
+# index_select
+main:index_select@index_select
+
+# binomial_out
+main:binomial_out@binomial
+
+# binomial
+main:binomial@binomial
+
+# index_put
+main:index_put_acc_false@index_put
+main:index_put_acc_true@index_put
+
+# fp8_fp4_mqa_logits
+main:fp8_fp4_mqa_logits@fp8_fp4_mqa_logits
+#   备注：inventory 标记 collected=no
+vllm:fp8_fp4_mqa_logits@fp8_fp4_mqa_logits
+
+# instance_norm
+main:instance_norm@instance_norm
+vllm:instance_norm@instance_norm
+
+# median_dim
+main:median_dim@median
+
+# standard_gamma
+main:standard_gamma@standard_gamma
+
+# count_nonzero
+main:count_nonzero@count_nonzero
+
+# index_put_
+main:index_put__acc_false@index_put
+main:index_put__acc_true@index_put
+
+# renorm_
+main:renorm_@renorm_
+
+# multinomial
+main:multinomial_with_replacement@multinomial
+
+# chunk_gdn2
+#   备注：仅 vllm
+vllm:chunk_gdn2@FLA/test_chunk_gdn2
+
+# fft_irfftn
+main:fft_irfftn@fft_irfftn
+
+# broadcast_to
+main:broadcast_to@broadcast_to
+
+# matmul_bias_activation
+main:matmul_bias_activation@matmul_bias_activation
+
+# nonzero_static
+main:perf_nonzero_static@nonzero_static
+
+# fused_marlin_moe_w8a16_fp8
+#   备注：仅 vllm；main 只有 w4a16_int4 / w4a16_mxfp4 / w8a16_int8
+vllm:fused_marlin_moe_w8a16_fp8@fused_marlin_moe_w8a16_fp8
+
+# scaled_grouped_mm
+#   备注：inventory 的 op 带 _benchmark 后缀；
+#          _v2 是 aten::_scaled_grouped_mm_v2，另一个算子，附带列出
+main:scaled_grouped_mm_benchmark@scaled_grouped_mm
+main:scaled_grouped_mm_v2_benchmark@scaled_grouped_mm_v2
+
+# conv1d_padding
+main:conv1d_padding@conv1d
+
+# convolution_mode
+main:convolution_mode@convolution_mode
+
+# sparse_mla_fwd_interface
+main:sparse_mla_fwd_interface@sparse_mla_fwd_interface
+vllm:sparse_mla_fwd_interface@sparse_mla_fwd_interface
+
+# conv2d
+#   备注：vllm 无
+main:conv2d@conv2d
+
+# conv2d_padding
+main:conv2d_padding@conv2d
+
+# segment_reduce_backward_out
+main:segment_reduce_backward_out@segment_reduce
+
+# segment_reduce_backward
+main:segment_reduce_backward@segment_reduce
+
+# index_copy
+main:index_copy@index_copy
+
+# renorm
+main:renorm@renorm
+
+# max_pool3d_backward
+main:perf_max_pool3d_backward@max_pool3d
+
+# efficient_attention_backward
+main:perf_efficient_attention_backward@flash_attention_backward
+
+# flash_attention_backward
+main:perf_flash_attention_backward@flash_attention_backward
+
+# masked_scatter
+main:masked_scatter@masked_scatter
+
+# index_copy_
+main:index_copy_@index_copy
+
+# masked_scatter_
+main:masked_scatter_inplace@masked_scatter
+
+# flash_mla_with_kvcache
+main:flash_mla_with_kvcache@flash_mla_with_kvcache
+vllm:flash_mla_with_kvcache@flash_mla_with_kvcache
+
+# sparse_semi_structured_linear
+main:sparse_semi_structured_linear@sparse_semi_structured_linear
+main:sparse_semi_structured_linear_with_bias@sparse_semi_structured_linear

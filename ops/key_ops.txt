@@ -1,0 +1,259 @@
+# mm
+main:mm@mm
+
+# w8a8_block_fp8_matmul
+main:perf_w8a8_block_fp8_matmul@blas_perf_parallel
+main:perf_w8a8_block_fp8_matmul@w8a8_block_fp8_matmul
+vllm:perf_w8a8_block_fp8_matmul@blas_perf_parallel
+vllm:perf_w8a8_block_fp8_matmul@w8a8_block_fp8_matmul
+
+# sparse_attn_triton
+main:sparse_attn_triton@sparse_attention
+#   备注：inventory 标记 marked_skip=yes
+vllm:sparse_attn_triton@sparse_attention
+
+# flash_mla_sparse_fwd
+main:flash_mla_sparse_fwd@flash_mla_sparse_fwd
+vllm:flash_mla_sparse_fwd@flash_mla_sparse_fwd
+
+# flash_attn_varlen_func
+main:flash_attn_varlen_func@flash_attn_varlen_func
+vllm:flash_attn_varlen_func@flash_attn_varlen_func
+
+# fused_experts_impl
+main:fused_moe_impl_gems_vs_vllm@fused_moe
+main:fused_moe_fp8@fused_moe_fp8
+main:fused_moe_fp8_blockwise@fused_moe_fp8_blockwise
+main:fused_moe_int4_w4a16@fused_moe_int4_w4a16
+main:fused_experts_impl_int8@fused_moe_int8
+main:fused_experts_impl_int8_w8a16@fused_moe_int8_w8a16
+vllm:fused_moe_impl_gems_vs_vllm@fused_moe
+vllm:fused_moe_fp8@fused_moe_fp8
+vllm:fused_moe_fp8_blockwise@fused_moe_fp8_blockwise
+vllm:fused_moe_int4_w4a16@fused_moe_int4_w4a16
+vllm:fused_experts_impl_int8@fused_moe_int8
+
+# baddbmm
+main:baddbmm@baddbmm
+
+# bmm
+main:bmm@bmm
+
+# addmm
+main:addmm@addmm
+
+# mv
+main:mv@mv
+
+# fused_deepseek_v4_qnorm_rope_kv_rope_insert
+#   备注：vllm 仅有 ..._quant_insert 变体，无本算子
+main:fused_deepseek_v4_qnorm_rope_kv_rope_insert@fused_deepseek_v4_qnorm_rope_kv_rope_insert
+
+# moe_align_block_size
+#   备注：inventory 命名为 moe_align_block_size_triton
+main:moe_align_block_size_triton@moe_align_block_size_triton
+main:moe_align_block_size_fast_paths@moe_align_block_size_triton
+vllm:moe_align_block_size_triton@moe_align_block_size_triton
+
+# topk
+#   备注：vllm 无同名算子（仅有 topk_softmax / top_k_per_row_* / persistent_topk）
+main:topk@topk
+
+# fused_add_rms_norm
+main:fused_add_rms_norm@fused_add_rms_norm
+vllm:fused_add_rms_norm@fused_add_rms_norm
+
+# per_token_group_quant_fp8
+main:per_token_group_quant_fp8@per_token_group_quant_fp8
+vllm:per_token_group_quant_fp8@per_token_group_quant_fp8
+
+# grouped_topk
+main:grouped_topk_no_renorm@grouped_topk
+main:grouped_topk_score_0@grouped_topk
+main:grouped_topk_score_1@grouped_topk
+vllm:grouped_topk_no_renorm@grouped_topk
+vllm:grouped_topk_score_0@grouped_topk
+vllm:grouped_topk_score_1@grouped_topk
+
+# rms_norm
+#   备注：vllm 无同名算子（仅有 gemma_rms_norm / add_rms_norm 等）
+main:rms_norm@rms_norm
+
+# mhc_pre
+main:mhc_pre@mhc
+vllm:mhc_pre@mhc
+
+# mhc_post
+main:mhc_post@mhc
+vllm:mhc_post@mhc
+
+# mul
+main:mul@mul
+
+# fused_marlin_moe
+#   备注：对应 inventory 的 w4a16_int4 基础变体
+main:fused_marlin_moe_w4a16_int4@fused_marlin_moe_w4a16_int4
+vllm:fused_marlin_moe_w4a16_int4@fused_marlin_moe_w4a16_int4
+
+# fused_marlin_moe_mxfp4
+#   备注：对应 inventory 的 w4a16_mxfp4 变体
+main:fused_marlin_moe_w4a16_mxfp4@fused_marlin_moe_w4a16_mxfp4
+vllm:fused_marlin_moe_w4a16_mxfp4@fused_marlin_moe_w4a16_mxfp4
+
+# fused_marlin_moe_int8
+#   备注：对应 inventory 的 w8a16_int8 变体
+main:fused_marlin_moe_w8a16_int8@fused_marlin_moe_w8a16_int8
+vllm:fused_marlin_moe_w8a16_int8@fused_marlin_moe_w8a16_int8
+
+# router_gemm
+main:perf_router_gemm@blas_perf_parallel
+main:perf_router_gemm@router_gemm
+vllm:perf_router_gemm@blas_perf_parallel
+vllm:perf_router_gemm@router_gemm
+
+# fp8_einsum
+main:perf_fp8_einsum_gems_vs_deepgemm@fp8_einsum
+vllm:perf_fp8_einsum_gems_vs_vllm@fp8_einsum
+
+# fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
+main:fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert@fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
+vllm:fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert@fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
+
+# fused_inv_rope_fp8_quant
+main:fused_inv_rope_fp8_quant@fused_inv_rope_fp8_quant
+vllm:fused_inv_rope_fp8_quant@fused_inv_rope_fp8_quant
+
+# pack_seq_triton
+main:pack_seq@pack_seq
+main:pack_seq_fp8@pack_seq
+main:pack_seq_int8@pack_seq
+vllm:pack_seq@pack_seq
+vllm:pack_seq_fp8@pack_seq
+vllm:pack_seq_int8@pack_seq
+
+# unpack_seq_triton
+main:unpack_seq@unpack_seq
+main:unpack_seq_fp8@unpack_seq
+main:unpack_seq_int8@unpack_seq
+vllm:unpack_seq@unpack_seq
+vllm:unpack_seq_fp8@unpack_seq
+vllm:unpack_seq_int8@unpack_seq
+
+# indexer_k_quant_and_cache
+#   备注：inventory 的 op 带 _benchmark 后缀，op_names 为空
+main:indexer_k_quant_and_cache_benchmark@indexer_k_quant_and_cache
+vllm:indexer_k_quant_and_cache_benchmark@indexer_k_quant_and_cache
+
+# cp_gather_indexer_k_quant_cache
+#   备注：inventory 的 op 带 _benchmark 后缀，op_names 为空
+main:cp_gather_indexer_k_quant_cache_benchmark@cp_gather_indexer_k_quant_cache
+vllm:cp_gather_indexer_k_quant_cache_benchmark@cp_gather_indexer_k_quant_cache
+
+# combine_topk_swa_indices
+#   备注：inventory 的 op 带 _benchmark 后缀，op_names 为空
+main:combine_topk_swa_indices_benchmark@deepseek_v4_attention_combine_topk_swa_indices
+vllm:combine_topk_swa_indices_benchmark@deepseek_v4_attention_combine_topk_swa_indices
+
+# group_mm
+#   备注：inventory 命名为 grouped_mm；vllm 无
+main:grouped_mm@grouped_mm
+
+# swiglu
+main:swiglu@swiglu
+vllm:swiglu@swiglu
+
+# compute_global_topk_indices_and_lens
+main:compute_global_topk_indices_and_lens_benchmark@deepseek_v4_attention_compute_global_topk_indices_and_lens
+vllm:compute_global_topk_indices_and_lens_benchmark@deepseek_v4_attention_compute_global_topk_indices_and_lens
+
+# dequantize_and_gather_k_cache
+main:dequantize_and_gather_k_cache_benchmark@deepseek_v4_attention_dequantize_and_gather_k_cache
+vllm:dequantize_and_gather_k_cache_benchmark@deepseek_v4_attention_dequantize_and_gather_k_cache
+
+# fused_q_kv_rmsnorm
+main:fused_q_kv_rmsnorm_benchmark@deepseek_v4_attention_fused_q_kv_rmsnorm
+vllm:fused_q_kv_rmsnorm_benchmark@deepseek_v4_attention_fused_q_kv_rmsnorm
+
+# flash_mla_with_kvcache
+main:flash_mla_with_kvcache@flash_mla_with_kvcache
+vllm:flash_mla_with_kvcache@flash_mla_with_kvcache
+
+# apply_rotary_pos_emb
+main:apply_rotary_pos_emb@apply_rotary_pos_emb
+vllm:apply_rotary_pos_emb@apply_rotary_pos_emb
+
+# conv2d
+#   备注：vllm 无
+main:conv2d@conv2d
+
+# glu
+#   备注：vllm 无（仅有 geglu / reglu / dgeglu 等变体）
+main:glu@glu
+
+# add_rms_norm
+main:add_rms_norm@add_rms_norm
+vllm:add_rms_norm@add_rms_norm
+
+# chunk_gated_delta_rule_fwd
+main:perf_chunk_gated_delta_rule_fwd@FLA/test_chunk_gated_delta_rule_fwd
+#   备注：ascend 变体
+vllm:perf_chunk_gated_delta_rule_fwd_ascend@FLA/test_chunk_gated_delta_rule_ascend
+vllm:perf_chunk_gated_delta_rule_fwd@FLA/test_chunk_gated_delta_rule_fwd
+
+# topk_softplus_sqrt
+main:topk_softplus_sqrt@topk_softplus_sqrt
+#   备注：vllm 另有 _tle / _hash 变体，未列
+vllm:topk_softplus_sqrt@topk_softplus_sqrt
+
+# top_k_per_row_decode
+main:top_k_per_row_decode@top_k_per_row_decode
+vllm:top_k_per_row_decode@top_k_per_row_decode
+
+# gemma_rms_norm_kernel
+#   备注：inventory 命名为 gemma_rms_norm；main 无
+vllm:gemma_rms_norm@gemma_rms_norm
+
+# top_k_per_row_prefill
+main:top_k_per_row_prefill@top_k_per_row_prefill
+vllm:top_k_per_row_prefill@top_k_per_row_prefill
+
+# chunk_gla
+#   备注：仅 vllm，op_names 为空
+vllm:perf_chunk_gla@FLA/test_chunk_gla_perf
+
+# flash_mla
+main:flash_mla@flash_mla
+vllm:flash_mla@flash_mla
+
+# chunk_gdn2
+#   备注：仅 vllm
+vllm:chunk_gdn2@FLA/test_chunk_gdn2
+
+# moe_sum
+main:moe_sum@moe_sum
+vllm:moe_sum@moe_sum
+
+# chunk_kda
+#   备注：仅 vllm
+vllm:chunk_kda@FLA/test_chunk_kda
+
+# megamoe
+#   备注：inventory 命名为 fp8_fp4_mega_moe；以下两个 op 同属一个 benchmark 文件
+main:fp8_fp4_mega_moe_vllm@fp8_fp4_mega_moe
+#   备注：torch reference 实现
+main:fp8_fp4_mega_moe_torch_ref@fp8_fp4_mega_moe
+#   备注：vllm 无该算子（仅有 stage_deepseek_v4_mega_moe_inputs 输入准备脚本）
+
+# persistent_topk
+#   备注：仅 vllm
+vllm:persistent_topk@persistent_topk
+
+# fp8_fp4_paged_mqa_logits
+main:fp8_fp4_paged_mqa_logits@fp8_fp4_paged_mqa_logits
+#   备注：inventory 标记 collected=no
+vllm:fp8_fp4_paged_mqa_logits@fp8_fp4_paged_mqa_logits
+
+# fp8_fp4_mqa_logits
+main:fp8_fp4_mqa_logits@fp8_fp4_mqa_logits
+#   备注：inventory 标记 collected=no
+vllm:fp8_fp4_mqa_logits@fp8_fp4_mqa_logits
