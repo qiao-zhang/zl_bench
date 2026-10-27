@@ -47,6 +47,7 @@ Triton cache dir:
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import re
@@ -181,10 +182,24 @@ def _wrap_bench(original):
     return wrapped
 
 
+# Linux caps one path component at 255 bytes, and a shape label becomes a
+# directory name. A wide shape -- or one whose repr is a long run of digits --
+# otherwise raises ENAMETOOLONG at exit and loses the whole IR dump.
+_MAX_LABEL = 64
+
+
+def _cap_label(label: str) -> str:
+    """Shorten a label to _MAX_LABEL, keeping it distinct with a digest."""
+    if len(label) <= _MAX_LABEL:
+        return label
+    digest = hashlib.sha1(label.encode("utf-8")).hexdigest()[:8]
+    return f"{label[: _MAX_LABEL - len(digest) - 1]}_{digest}"
+
+
 def _label_of(shape):
     if isinstance(shape, (list, tuple)):
-        return "x".join(re.sub(r"\W", "", str(v)) for v in shape)
-    return re.sub(r"\W", "", str(shape))
+        return _cap_label("x".join(re.sub(r"\W", "", str(v)) for v in shape))
+    return _cap_label(re.sub(r"\W", "", str(shape)))
 
 
 def _shape_label(bench, idx):

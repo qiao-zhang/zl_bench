@@ -45,4 +45,17 @@ def test_rows_tsv_prefers_the_timed_kernels(tmp_path, monkeypatch):
     assert lines[0] == "op_name\tdtype\trow\tshape\tkernels\tscope"
     assert lines[1:] == ["softmax\ttorch.float16\t0\t4x4\tH1,H2\ttimed",
                          "softmax\ttorch.float16\t1\t8x8\tH4\trow",
-                         "softmax\ttorch.float16\t2\tx\t?\t-"]
+                         "softmax\ttorch.float16\t2\tx\t?\t-",
+                         ]
+
+
+def test_label_of_caps_a_wide_shape():
+    """A shape label becomes a directory name and Linux caps one component at 255
+    bytes: a long label must shrink, and stay distinct after shrinking."""
+    label = dump._label_of(list(range(2000)))
+    assert len(label) <= dump._MAX_LABEL
+    # Same first _MAX_LABEL characters, one extra element: only the digest separates them.
+    a, b = list(range(100)), list(range(100)) + [0]
+    assert dump._label_of(a)[:55] == dump._label_of(b)[:55]
+    assert dump._label_of(a) != dump._label_of(b)
+    assert dump._label_of([64, 128, 128]) == "64x128x128"  # short shapes untouched
