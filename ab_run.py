@@ -93,6 +93,10 @@ def parse_args() -> argparse.Namespace:
                         "MACA_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES, else every device their "
                         "SMI tool lists; both sides must see the same cards)")
     e.add_argument("--dtypes", default="", help='dtype whitelist, e.g. "bfloat16 float16"')
+    e.add_argument("--metrics", default="",
+                   help='metric whitelist, e.g. "latency"; empty = upstream default. '
+                        '"latency" skips the baseline op, which an A/B of two compiler builds '
+                        'does not need (both sides are compared on the gems latency alone)')
     e.add_argument("--shape-file", type=Path, default=None,
                    help="shape set (default: the record's archived shapes.yaml per op)")
     e.add_argument("--op-timeout", type=int, default=3600,
@@ -140,6 +144,7 @@ def side_stacks(sides: Dict[str, dict]) -> Dict[str, str]:
 
 def manifest(args: argparse.Namespace) -> dict:
     return {"record": str(args.record), "sides": args.sides, "dtypes": args.dtypes,
+            "metrics": args.metrics,
             "shape_file": str(args.shape_file or ""), "use_flagtune": args.use_flagtune}
 
 
@@ -230,7 +235,8 @@ class Runner:
     def side_args(self, side: str) -> argparse.Namespace:
         a, cfg = self.args, self.args.sides[side]
         return argparse.Namespace(
-            resume=True, dtypes=a.dtypes, op_timeout=a.op_timeout, shape_file=a.shape_file,
+            resume=True, dtypes=a.dtypes, metrics=a.metrics, op_timeout=a.op_timeout,
+            shape_file=a.shape_file,
             replay_root=a.record, use_flagtune=a.use_flagtune, busy_gpu=a.busy_gpu,
             env=cfg["env"], pythonpath=cfg["pythonpath"])
 

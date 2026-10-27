@@ -34,6 +34,13 @@ USE_FLAGTUNE="${USE_FLAGTUNE:-0}"
 # supported by this op", which run_batch.py uses to retry without the filter.
 DTYPES="${DTYPES:-}"
 
+# Optional metric whitelist, space separated (e.g. "latency"); empty = upstream's
+# default (latency_base latency speedup). `latency` alone skips the baseline op,
+# which is what an A/B of two compiler builds needs -- and all some vendor C++
+# baselines can do, they are often not built for the accelerator at all. The
+# result table keeps its three columns, the missing ones read N/A.
+METRICS="${METRICS:-}"
+
 # Empty = record mode: the chosen configs go to autotune_records/<op>.json.
 # A past run dir = replay its records, pinning the same configs on both A/B sides.
 REPLAY_FROM="${REPLAY_FROM:-}"
@@ -107,6 +114,12 @@ for _dt in $DTYPES; do
   DTYPE_ARGS+=(--dtypes "$_dt")
 done
 
+# Same for --metrics (also action=append).
+METRIC_ARGS=()
+for _metric in $METRICS; do
+  METRIC_ARGS+=(--metrics "$_metric")
+done
+
 # Record and replay are mutually exclusive, each enabled by its own variable.
 if [[ -n "$REPLAY_FROM" ]]; then
   AUTOTUNE_ENV="FLAGGEMS_PERF_AUTOTUNE_REPLAY_DIR=$REPLAY_FROM/autotune_records"
@@ -148,6 +161,7 @@ status=0
   USE_FLAGTUNE="$USE_FLAGTUNE" python -u -m pytest -s -rsx "$TEST_PATH::test_${OP}" \
     -p no:cacheprovider "${PLUGINS[@]}" "${PYTEST_COLOR[@]}" \
     --shape_file "$SHAPE_FILE" ${DTYPE_ARGS[@]+"${DTYPE_ARGS[@]}"} \
+    ${METRIC_ARGS[@]+"${METRIC_ARGS[@]}"} \
     --level core --mode kernel || status=$?
   rm -rf "$CACHE_DIR"
 

@@ -413,6 +413,19 @@ def test_spawn_sets_the_maca_visibility_variable_on_metax(monkeypatch, tmp_path)
     assert seen["env"]["CUDA_VISIBLE_DEVICES"] == "3"
 
 
+def test_spawn_passes_the_metric_whitelist(monkeypatch, tmp_path):
+    """--metrics latency skips the baseline op; it travels as METRICS, and an unset
+    value must not leak the caller's shell variable into the op."""
+    monkeypatch.setenv("METRICS", "latency_base")  # the caller's value must not win
+    seen = _capture_spawn(monkeypatch)
+    case = run_batch.Case("main", "abs", "abs", "abs")
+    run_batch._spawn(case, tmp_path / "a", "0", _spawn_args(metrics="latency"), "")
+    assert seen["env"]["METRICS"] == "latency"
+
+    run_batch._spawn(case, tmp_path / "b", "0", _spawn_args(), "")
+    assert "METRICS" not in seen["env"]
+
+
 def test_spawn_takes_the_maca_stack_from_a_batch_env(monkeypatch, tmp_path):
     for key in ("MACA_PATH", "MACA_VISIBLE_DEVICES"):
         monkeypatch.delenv(key, raising=False)

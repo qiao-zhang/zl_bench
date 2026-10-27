@@ -590,7 +590,7 @@ def _spawn(case: Case, out_dir: Path, gpu: str, args: argparse.Namespace,
     # The batch arguments win: same-named variables from the caller's shell must
     # not leak into run_pytest.sh. PARALLEL_WARMUP_GPUS: the batch already
     # shards across GPUs, so no per-op parallelism.
-    for key in ("PARALLEL_WARMUP_GPUS", "REPLAY_FROM", "SHAPE_FILE", "DTYPES"):
+    for key in ("PARALLEL_WARMUP_GPUS", "REPLAY_FROM", "SHAPE_FILE", "DTYPES", "METRICS"):
         env.pop(key, None)
     # GPU numbers as the management tool shows them, which the idle check relies on.
     env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -616,6 +616,9 @@ def _spawn(case: Case, out_dir: Path, gpu: str, args: argparse.Namespace,
         env["SHAPE_FILE"] = str(args.shape_file)
     if dtypes:
         env["DTYPES"] = dtypes
+    metrics = getattr(args, "metrics", "")
+    if metrics:
+        env["METRICS"] = metrics
     replay = replay_dir(case, args)
     if replay:
         env["REPLAY_FROM"] = str(replay)
@@ -786,6 +789,12 @@ def parse_args() -> argparse.Namespace:
                           "the default is each op's archived shapes.yaml from the A side")
     run.add_argument("--dtypes", default="",
                      help='dtype whitelist, space separated (e.g. "bfloat16"); empty = upstream sweep')
+    run.add_argument("--metrics", default="",
+                     help='metric whitelist, space separated (e.g. "latency"); empty = '
+                          'upstream default (latency_base latency speedup). "latency" alone '
+                          'skips the baseline op: an A/B of two compiler builds only compares '
+                          'the gems latency, and vendor C++ baselines are often not built for '
+                          'the accelerator at all. Passed on both A/B sides unchanged.')
     run.add_argument("--use-flagtune", type=int, default=0, choices=(0, 1),
                      help="passed through as USE_FLAGTUNE (default 0; must match on both A/B sides)")
     run.add_argument("--env", action="append", default=[], metavar="K=V",
