@@ -102,6 +102,143 @@ def test_gpu_users_falls_back_to_the_nvidia_spelling(monkeypatch):
     assert "--query-gpu=index,uuid,memory.used" in seen
 
 
+# Real `mx-smi` (2.3.4 / MACA 3.8.1.3) output: device lines carry no colon before
+# the product name, memory is reported in KB, processes in a box that says
+# `no process found` on an idle card.
+MX_LISTING = (
+    "mx-smi  version: 2.3.4\n"
+    "GPU#0    MXC550      0000:2b:00.0   Available (UUID: GPU-0bde36ca-2b0e-3108-0512-6a8e65e21b58)\n"
+    "GPU#1    MXC550      0000:3a:00.0   Available (UUID: GPU-bc1ae580-0fd1-8ee6-247e-c780293b629a)\n"
+)
+MX_MEMORY = (
+    "Attached GPUs                                     : 2\n"
+    "GPU#0  MXC550  0000:2b:00.0\n"
+    "    Memory\n"
+    "        vis_vram total                            : 67108864 KB\n"
+    "        vis_vram used                             : 879036 KB\n"
+    "        vis_vram usage                            : 1.3 %\n"
+    "        vram total                                : 67108864 KB\n"
+    "        vram used                                 : 879036 KB\n"
+    "GPU#1  MXC550  0000:3a:00.0\n"
+    "    Memory\n"
+    "        vis_vram used                             : 3145728 KB\n"
+    "        vram used                                 : 3145728 KB\n"
+)
+MX_PROCS_IDLE = (
+    "+---------------------------------------------------------------------------------+\n"
+    "| Process:                                                                        |\n"
+    "|  GPU                    PID         Process Name                 GPU Memory     |\n"
+    "|                                                                  Usage(MiB)     |\n"
+    "|=================================================================================|\n"
+    "|  no process found                                                               |\n"
+    "+---------------------------------------------------------------------------------+\n"
+)
+MX_PROCS_BUSY = MX_PROCS_IDLE.replace(
+    "|  no process found                                                               |",
+    "|  0      1787940     python -m pytest           1024                             |")
+# A neighbour's torchrun (pt_elastic) holds a device file on every card with 0 MiB:
+# this is what --show-all-process prints on a box that also runs someone else's job.
+MX_PROCS_ALL = (
+    "|  0                  2921416         python                       1258           |\n"
+    "|  0                  2921417         python                       0              |\n"
+    "|  0                  2923230         python                       0              |\n"
+    "|  0                  2923640         pt_elastic                   0              |\n"
+    "|  5                  2921416         python                       0              |\n"
+    "|  5                  2923640         pt_elastic                   0              |\n"
+)
+MX_MEMORY_IDLE = MX_MEMORY.replace("3145728", "879036")  # both cards at the driver baseline
+
+
+def test_mx_memory_and_processes_parsing():
+    assert run_batch.parse_mx_memory(MX_MEMORY) == {"0": 879036, "1": 3145728}
+    assert run_batch.parse_mx_processes(MX_PROCS_IDLE) == {}
+    assert run_batch.parse_mx_processes(MX_PROCS_BUSY) == {
+        "0": ["pid 1787940 python -m pytest (1024 MiB)"]}
+    assert run_batch.parse_mx_processes(MX_PROCS_ALL)["0"] == [
+        "pid 2921416 python (1258 MiB)", "pid 2921417 python (0 MiB)",
+        "pid 2923230 python (0 MiB)", "pid 2923640 pt_elastic (0 MiB)"]
+
+
+def test_gpu_users_ignores_idle_mx_smi_handles(monkeypatch):
+    """0 MiB rows are idle device-file handles, not users: counting them would make
+    --busy-gpu wait hang forever on a box where a neighbour's torchrun opened every
+    card."""
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "mx-smi")
+
+    def fake(args, env=None):
+        if args[0] in ("--show-process", "--show-all-process"):
+            return MX_PROCS_ALL
+        return MX_MEMORY_IDLE
+
+    monkeypatch.setattr(run_batch, "_smi", fake)
+    assert run_batch.gpu_users("0") == ["pid 2921416 python (1258 MiB)"]
+    assert run_batch.gpu_users("1") == []  # only 0 MiB handles (none at all here)
+
+
+# `mx-smi --show-process` (the preferred spelling) on the same box: same box drawing,
+# but only the process that is actually running.
+MX_PROCS_RUNNING = (
+    "+---------------------------------------------------------------------------------+\n"
+    "| Process:                                                                        |\n"
+    "|  GPU                    PID         Process Name                 GPU Memory     |\n"
+    "|                                                                  Usage(MiB)     |\n"
+    "|=================================================================================|\n"
+    "|  1                  2929140         python                       5054           |\n"
+    "+---------------------------------------------------------------------------------+\n"
+)
+
+
+def test_gpu_users_uses_show_process_before_the_wider_spelling(monkeypatch):
+    """--show-process reports only the running process, so it is asked first; the
+    listing of idle device-file handles is the fallback only."""
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "mx-smi")
+    seen = []
+
+    def fake(args, env=None):
+        seen.append(args[0])
+        return MX_PROCS_RUNNING if args[0] == "--show-process" else MX_MEMORY
+
+    monkeypatch.setattr(run_batch, "_smi", fake)
+    assert run_batch.gpu_users("1") == ["pid 2929140 python (5054 MiB)"]
+    assert seen[0] == "--show-memory"
+    assert "--show-process" in seen
+    assert "--show-all-process" not in seen  # never reached once the precise one answers
+
+
+def test_visible_gpus_accepts_a_colonless_mx_smi_listing(monkeypatch):
+    """mx-smi 2.3.x writes `GPU#0    MXC550   0000:2b:00.0`, with no colon for the
+    old regex to key on."""
+    monkeypatch.delenv("MACA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: MX_LISTING if args == ["-L"] else None)
+    assert run_batch.visible_gpus(None) == ["0", "1"]
+
+
+def test_gpu_users_uses_the_mx_smi_blocks(monkeypatch):
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "mx-smi")
+    out = {"--show-memory": MX_MEMORY, "--show-all-process": MX_PROCS_IDLE}
+    monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: out.get(args[0]))
+    # 879036 KB (858 MiB) is the driver baseline of an idle card, below BUSY_MEMORY_MIB.
+    assert run_batch.gpu_users("0") == []
+    # 3145728 KB with no process listed: another container's, or not visible here.
+    assert run_batch.gpu_users("1") == ["3072 MiB in use by processes not visible here"]
+    assert run_batch.gpu_users("9") is None
+
+
+def test_gpu_users_reports_the_mx_smi_process_rows(monkeypatch):
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "mx-smi")
+    out = {"--show-memory": MX_MEMORY, "--show-all-process": MX_PROCS_BUSY}
+    monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: out.get(args[0]))
+    assert run_batch.gpu_users("0") == ["pid 1787940 python -m pytest (1024 MiB)"]
+
+
+def test_mx_gpu_index_maps_a_uuid(monkeypatch):
+    monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: MX_LISTING if args == ["-L"] else None)
+    assert run_batch._mx_gpu_index("1") == "1"
+    assert run_batch._mx_gpu_index("GPU-bc1ae580-0fd1-8ee6-247e-c780293b629a") == "1"
+    assert run_batch._mx_gpu_index("GPU-unknown") is None
+
+
 def test_wait_for_idle_gpu_policies(monkeypatch):
     monkeypatch.setattr(run_batch, "gpu_users", lambda gpu, env=None: ["pid 1 x (1 MiB)"])
     assert run_batch.wait_for_idle_gpu("0", "ignore") == ""

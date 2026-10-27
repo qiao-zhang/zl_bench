@@ -95,7 +95,19 @@ SMI_APPS_ARGS = (
     ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
      "--format=csv,noheader,nounits"],
 )
-_LIST_GPU_RE = re.compile(r"^\s*(?:GPU|PPU)\s*#?\s*\d+\s*:")
+# mx-smi (MACA 3.8) has neither --query-gpu nor --query-compute-apps: it reports
+# memory and processes as human-readable blocks. `-j` carries the same data as
+# JSON, but its layout is not documented and it is missing from older releases,
+# so the text blocks are what we parse.
+MX_MEMORY_ARGS = (["--show-memory"],)
+# --show-process ("currently running") mirrors nvidia-smi's --query-compute-apps;
+# --show-all-process lists every process holding a device file, including idle
+# 0 MiB handles a neighbour's torchrun leaves on every card, so it is only the
+# fallback and its idle rows are dropped (see _mx_smi_gpu_users).
+MX_APPS_ARGS = (["--show-process"], ["--show-all-process"])
+_LIST_GPU_RE = re.compile(r"^\s*(?:GPU|PPU)\s*#?\s*\d+\b")
+# Device lines carry no colon on mx-smi 2.3.x: `GPU#0    MXC550      0000:2b:00.0`,
+# where nvidia-smi/ppu-smi write `GPU 0: ...`. Match the number, not a colon.
 # mx-smi's summary block states the device count in its `Attached GPUs: N` line
 # (FlagGems' gpu_check_metax.sh reads the same field); used when no -L spelling
 # works.
@@ -410,10 +422,88 @@ def parse_compute_apps(text: str, uuid: str) -> List[str]:
     return out
 
 
+# `GPU#0  MXC550  0000:2b:00.0` opens a per-device block in --show-memory.
+_MX_BLOCK_RE = re.compile(r"^\s*GPU#?(\d+)\b")
+# Inside such a block: `        vis_vram used                             : 879036 KB`.
+# mx-smi reports KB, where nvidia-smi's --query-gpu reports MiB.
+_MX_USED_RE = re.compile(r"^\s*(vis_vram|vram)\s+used\s*:\s*(\d+)\s*KB", re.IGNORECASE)
+# One row of --show-all-process's box: `|  0   4242   python   1024  |`.
+_MX_PROC_RE = re.compile(r"^\s*\|\s*(\d+)\s+(\d+)\s+(.+?)\s+(\d+)\s*\|?\s*$")
+# A `mx-smi -L` device line: `GPU#4    MXC550   0000:aa:00.0   Available (UUID: GPU-...)`.
+# MULTILINE: the listing is scanned as a whole, not line by line.
+_MX_UUID_RE = re.compile(r"^\s*GPU#?(\d+)\b.*?(GPU-[0-9a-fA-F-]+)", re.MULTILINE)
+
+
+def parse_mx_memory(text: str) -> Dict[str, int]:
+    """`mx-smi --show-memory` -> {gpu index: KB in use}.
+
+    vis_vram (what a process can see) wins over vram (the whole card). Both are
+    KB, unlike the MiB that nvidia-smi's --query-gpu reports."""
+    vram: Dict[str, int] = {}
+    vis: Dict[str, int] = {}
+    cur = None
+    for line in text.splitlines():
+        block = _MX_BLOCK_RE.match(line)
+        if block:
+            cur = block.group(1)
+            continue
+        used = _MX_USED_RE.match(line) if cur is not None else None
+        if used:
+            (vis if used.group(1).lower() == "vis_vram" else vram)[cur] = int(used.group(2))
+    return {**vram, **vis}
+
+
+def parse_mx_processes(text: str) -> Dict[str, List[str]]:
+    """`mx-smi --show-all-process` -> {gpu index: [process, ...]}.
+
+    An idle card prints `no process found` inside the box, which no row matches.
+    A process name containing spaces stays whole: the PID and memory columns are
+    numeric, so the name is whatever lies between them."""
+    out: Dict[str, List[str]] = {}
+    for line in text.splitlines():
+        row = _MX_PROC_RE.match(line)
+        if row:
+            gpu, pid, name, mib = row.groups()
+            out.setdefault(gpu, []).append(f"pid {pid} {name.strip()} ({mib} MiB)")
+    return out
+
+
+def _mx_gpu_index(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The mx-smi device index for gpu, which may be handed in as a UUID."""
+    if gpu.isdigit():
+        return gpu
+    for index, uuid in _MX_UUID_RE.findall(_smi_first(SMI_LIST_ARGS, env=env) or ""):
+        if uuid == gpu:
+            return index
+    return None
+
+
+def _mx_smi_gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
+    """gpu_users for mx-smi: --show-memory supplies the usage, --show-process the
+    PIDs. Same policy as the NVIDIA path, on KB-scaled numbers."""
+    memory = _smi_first(MX_MEMORY_ARGS, env=env)
+    apps = _smi_first(MX_APPS_ARGS, env=env)
+    index = _mx_gpu_index(gpu, env)
+    if memory is None or apps is None or index is None:
+        return None
+    used_kb = parse_mx_memory(memory).get(index)
+    if used_kb is None:
+        return None
+    # A 0 MiB row is an idle device-file handle: a neighbour's torchrun opens every
+    # card without using it, and counting those would report the box busy forever.
+    procs = [p for p in parse_mx_processes(apps).get(index, []) if not p.endswith("(0 MiB)")]
+    if not procs and used_kb // 1024 >= BUSY_MEMORY_MIB:
+        procs = [f"{used_kb // 1024} MiB in use by processes not visible here"]
+    return procs
+
+
 def gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
     """What is using gpu (a management-tool index or a GPU uuid): its processes, or
     the memory in use when no process is listed; empty when idle, None if the tool
     cannot tell."""
+    if smi_tool(op_env(env)) == "mx-smi":
+        # mx-smi speaks none of the --query-* spellings below.
+        return _mx_smi_gpu_users(gpu, env)
     gpus = _smi_first(SMI_GPU_ARGS, csv_query=True, env=env)
     apps = _smi_first(SMI_APPS_ARGS, csv_query=True, env=env)
     info = parse_gpus(gpus).get(gpu) if gpus else None
@@ -433,8 +523,9 @@ def _no_smi_reason(env: Optional[Dict[str, str]] = None) -> str:
     """Why the device query is impossible, for the one warning the batch prints."""
     tool = smi_tool(env)
     if tool is not None:
-        return (f"{tool} cannot list GPU processes "
-                "(tried -L/--query-ppu/--query-gpu and their compute-apps forms)")
+        tried = ("-L/--show-memory/--show-all-process" if tool == "mx-smi"
+                 else "-L/--query-ppu/--query-gpu and their compute-apps forms")
+        return f"{tool} cannot list GPU processes (tried {tried})"
     vendor = accelerator(env)
     expected = VENDOR_SMI.get(vendor or "")
     if expected:
