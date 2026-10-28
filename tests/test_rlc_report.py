@@ -75,9 +75,9 @@ def test_resolve_expands_every_test_for_one_name(monkeypatch, tmp_path):
 
 
 def _row(label="main:kron@kron", dtype="torch.bfloat16", gap=0.5, a=0.05, b=0.02,
-         gate="changed", flags="", verdict="faster", row=0):
+         gate="changed", flags="", verdict="faster", row=0, confirm=""):
     return rlc_report.Row(label, "main/kron", "kron", dtype, row, gap, a, b,
-                          gate, flags, verdict)
+                          gate, flags, verdict, confirm)
 
 
 def test_summarizing_splits_gain_and_loss_rows():
@@ -88,6 +88,148 @@ def test_summarizing_splits_gain_and_loss_rows():
     assert stats["gain"] == (0.5, 1.5, 2)
     assert stats["loss"] == (-0.2, -0.2, 1)
     assert stats["cvt"] == (None, None, False)
+
+
+def test_read_ab_csv_carries_the_confirm_column(tmp_path):
+    """The recheck outcome has to reach the table: `timer_mismatch` there is the only
+    place the report can say a verdict was never confirmed."""
+    path = tmp_path / "rows.csv"
+    path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict,confirm\n"
+        "main:kron@kron,main/kron,kron,torch.bfloat16,0,0.5,0.05,0.02,changed,,faster,"
+        "timer_mismatch\n")
+    row = rlc_report.read_ab_csv(path)[0]
+    assert row.confirm == "timer_mismatch"
+    assert row.flags == "" and row.gap == 0.5
+
+
+def test_read_ab_csv_tolerates_a_csv_without_the_confirm_column(tmp_path):
+    """A --csv written before this column existed still loads (confirm defaults to "")."""
+    path = tmp_path / "rows.csv"
+    path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        "main:kron@kron,main/kron,kron,torch.bfloat16,0,0.5,0.05,0.02,changed,,faster\n")
+    assert rlc_report.read_ab_csv(path)[0].confirm == ""
+
+
+def test_row_notes_separate_a_mismatched_main_round_from_a_refused_recheck():
+    """Two warnings, not one: a mismatched main round makes that row's gap uncomparable,
+    while a refused recheck only leaves the main-round verdict unconfirmed — the main
+    rounds themselves are clean, so they must not be called uncomparable."""
+    mismatched = [_row(flags="timer_mismatch", gap=0.2)]
+    assert rlc_report.row_notes(mismatched, None, {}, "main:kron@kron") == [
+        "A/B 计时口径不一致，性能差异不可直接比较（未计入收益/损失汇总，1 行）"]
+    refused = [_row(gap=0.2, confirm="timer_mismatch"),
+               _row(row=1, gap=0.1, confirm="timer_mismatch")]
+    assert rlc_report.row_notes(refused, None, {}, "main:kron@kron") == [
+        "复测计时口径不一致，主轮次结论未确认（2 行，未计入汇总）"]
+    # --include-unconfirmed: the note must say the numbers contain them after all
+    assert rlc_report.row_notes(mismatched, None, {}, "main:kron@kron", dropping=False) == [
+        "A/B 计时口径不一致，性能差异不可直接比较（仍计入汇总）"]
+
+
+def test_summarizing_excludes_unconfirmed_rows_by_default():
+    """Rows whose timing is not comparable stay counted in `rows` (the table still warns
+    about them) but drop out of the gain/loss ranges, and the note reports how many."""
+    rows = [_row(gap=0.5, flags="timer_mismatch"),
+            _row(row=1, gap=-0.2, a=0.02, b=0.025, confirm="timer_mismatch"),
+            _row(row=2, gap=0.3)]
+    stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16")
+    assert stats["rows"] == 3                      # 仍计入行数（诊断展示）
+    assert stats["gain"] == (0.3, 0.3, 1)          # 只有干净行进收益区间
+    assert stats["loss"] == (None, None, 0)
+    assert "未计入收益/损失汇总，1 行" in stats["note"]
+    assert "1 行，未计入汇总" in stats["note"]        # 复测被拒的那 1 行
+
+
+def test_unconfirmed_covers_every_confirm_state_but_a_plain_undecided():
+    """Every confirm state means the recheck settled nothing or refuted the verdict, so
+    none may count as a measured gain. A plain undecided row (no confirm) measured
+    nothing against it yet and stays in the summaries."""
+    for state in ("timer_mismatch", "insufficient_rounds", "not_reproduced"):
+        assert rlc_report.unconfirmed(_row(confirm=state))
+    assert rlc_report.unconfirmed(_row(flags="timer_mismatch"))
+    assert rlc_report.unconfirmed(_row(flags="unconfirmed"))   # confirm 列被裁剪也认
+    assert not rlc_report.unconfirmed(_row(verdict="undecided", confirm=""))
+    assert not rlc_report.unconfirmed(_row(confirm="confirmed"))
+
+
+def test_row_notes_give_each_recheck_outcome_its_own_note():
+    rows = [_row(confirm="timer_mismatch"),
+            _row(row=1, confirm="insufficient_rounds"),
+            _row(row=2, confirm="not_reproduced")]
+    assert rlc_report.row_notes(rows, None, {}, "main:kron@kron") == [
+        "复测计时口径不一致，主轮次结论未确认（1 行，未计入汇总）",
+        "复测样本不足，主轮次结论未确认（1 行，未计入汇总）",
+        "复测未重现（1 行，未计入汇总）"]
+
+
+def test_row_notes_fall_back_to_a_generic_note_without_a_confirm_column():
+    """A --csv whose `confirm` column was dropped keeps only `flags=unconfirmed`. The row
+    is still excluded, so the note has to say why instead of staying silent — and it must
+    not repeat a specific reason when one is present."""
+    rows = [_row(flags="unconfirmed", confirm="", gap=0.2)]
+    assert rlc_report.row_notes(rows, None, {}, "main:kron@kron") == [
+        "结果未确认（1 行，未计入汇总）"]
+    assert rlc_report.row_notes(rows, None, {}, "main:kron@kron", dropping=False) == [
+        "结果未确认（1 行，仍计入汇总）"]
+    named = [_row(flags="unconfirmed", confirm="not_reproduced", gap=0.2)]
+    assert rlc_report.row_notes(named, None, {}, "main:kron@kron") == [
+        "复测未重现（1 行，未计入汇总）"]
+    mismatch = [_row(flags="unconfirmed;timer_mismatch", gap=0.2)]
+    assert rlc_report.row_notes(mismatch, None, {}, "main:kron@kron") == [
+        "A/B 计时口径不一致，性能差异不可直接比较（未计入收益/损失汇总，1 行）"]
+
+
+def test_summarizing_reports_the_generic_note_when_confirm_is_missing(tmp_path):
+    """Same path end to end through the CSV reader: no confirm column, only flags."""
+    path = tmp_path / "rows.csv"
+    path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        "main:kron@kron,main/kron,kron,torch.bfloat16,0,0.5,0.05,0.02,changed,unconfirmed,"
+        "faster\n")
+    row = rlc_report.read_ab_csv(path)[0]
+    assert rlc_report.unconfirmed(row)
+    stats = rlc_report.summarizing([row], {}, None, {}, "main:kron@kron", "bf16")
+    assert stats["rows"] == 1
+    assert stats["gain"] == (None, None, 0)
+    assert "结果未确认（1 行，未计入汇总）" in stats["note"]
+
+
+def test_summarizing_excludes_not_reproduced_and_short_rechecks():
+    rows = [_row(gap=0.5, confirm="not_reproduced"),
+            _row(row=1, gap=0.4, confirm="insufficient_rounds"),
+            _row(row=2, gap=0.2)]
+    stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16")
+    assert stats["rows"] == 3
+    assert stats["gain"] == (0.2, 0.2, 1)
+    assert "复测未重现（1 行，未计入汇总）" in stats["note"]
+    assert "复测样本不足，主轮次结论未确认（1 行，未计入汇总）" in stats["note"]
+
+
+def test_summarizing_counts_unconfirmed_rows_when_asked():
+    """--include-unconfirmed puts them back, and the note says the numbers contain them."""
+    rows = [_row(gap=0.5, flags="timer_mismatch"),
+            _row(row=1, gap=-0.2, a=0.02, b=0.025, confirm="timer_mismatch")]
+    stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16",
+                                   include_unconfirmed=True)
+    assert stats["rows"] == 2
+    assert stats["gain"] == (0.5, 0.5, 1)
+    assert stats["loss"] == (-0.2, -0.2, 1)
+    assert "仍计入汇总" in stats["note"]
+
+
+def test_op_entry_saving_and_cost_skip_unconfirmed_rows():
+    """The op's saving/cost maxima are a second summary path and follow the same rule."""
+    rows = [_row(gap=0.5, a=0.05, b=0.02),
+            _row(row=1, gap=0.2, a=0.10, b=0.02, flags="timer_mismatch")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert entry["rows"] == 2
+    assert entry["saving"] == pytest.approx(0.03)          # 只算干净行 0.05-0.02
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {},
+                                include_unconfirmed=True)
+    assert entry["saving"] == pytest.approx(0.08)          # 0.10-0.02 回来了
 
 
 def test_summarizing_reads_the_gate_convert_layout_count(tmp_path):

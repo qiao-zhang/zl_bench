@@ -1,0 +1,344 @@
+# metax key ops — RLC 增强 A/B 可用子集
+#
+# 来源：ops/key_ops.txt（122 条），按 A 轮 record 实测过滤
+#   runs/metax/key_multi_261026/base   (FLAGTREE_RLC_ENHANCE=0, FLAGTREE_BACKEND=metax)
+#   A 轮总计：PASS=58  SKIP=41  FAIL=23
+# 本文件只保留 PASS 的 58 条，剔除与 RLC 无关的 SKIP(41) + FAIL(23) = 64 条。
+#
+# 剔除类别（都不受 RLC 开关影响，属于环境/上游/编译器问题；修好后可从文件末尾清单恢复）：
+#   [arch]  架构或厂商专属：Hopper-only FP8/marlin、Hygon、Moore Threads、SM90+、fp8e4nv 需 cap>=8.9
+#   [third] 缺第三方实现：vLLM DeepGEMM / FlashMLA / flashinfer / TransformerEngine / vllm-ascend
+#   [ver]   版本不匹配：vLLM 0.20.x 范围、fla 缺 state_v_first
+#   [buf]   MACA 资源上限：shared memory 65536 B / threads 512（多由启发式 num_stages、block 过大）
+#   [cc]    MACA 编译器/后端缺口：无 TMA lowering、无 fp16 累加 MMA、TLE builder 缺 nv_mma shared、TLE 原语缺失
+#   [fp8]   fp8 dot 无 MACA MMA，FMA 路径断言失败
+#   [bug]   上游 benchmark 缺陷：vendor if/elif 链缺 else 导致 NameError、跨目录 import
+#   [crash] 设备端越界崩溃（exit 139，会污染 GPU context）
+#
+# 注意：
+#   1. run_batch.py 的 --ops-file 不做 dismiss 过滤（--dismiss 只作用于 --all），
+#      所以这份清单本身就是"只跑能跑的"那层过滤。
+#   2. main:perf_chunk_gated_delta_rule_fwd 在 A 轮是 PASS 但 rows=0/0（自定义输出格式，
+#      解析不到 BenchmarkResult 表），A/B 前请确认它确实产出 latency 行。
+#
+# 复跑（与 A 轮同环境）：
+#   python run_batch.py --ops-file ops/key_ops_metax.txt \
+#     --shape-file shape/all_ops_multi.yaml \
+#     --env BASH_ENV=/workspace/.zl_bench_env.sh \
+#     --env FLAGTREE_RLC_ENHANCE=0 --env FLAGTREE_BACKEND=metax \
+#     --env PYTHONPATH=/flagos/lib/python3.12/site-packages \
+#     --gpus "$GPUS" --op-timeout 72000 --metrics latency --batch-dir $BASE
+#
+# RLC A/B（A=关，B=开）：ab_run.py 的 --record 必填，指向上面的 record 产物（batch dir）。
+# --shape-file 留空即用 record 归档的 shapes.yaml；--metrics / --op-timeout / env 与 record
+# 保持一致，否则两侧跑的不是同一批 shape、或用不同指标。
+#   export BASE=/workspace/zl_bench/runs/metax/key_multi_261026/base
+#   python ab_run.py --record "$BASE" --ops-file ops/key_ops_metax.txt \
+#     --a-env FLAGTREE_RLC_ENHANCE=0 --b-env FLAGTREE_RLC_ENHANCE=1 \
+#     --a-env FLAGTREE_BACKEND=metax  --b-env FLAGTREE_BACKEND=metax \
+#     --a-env BASH_ENV=/workspace/.zl_bench_env.sh \
+#     --b-env BASH_ENV=/workspace/.zl_bench_env.sh \
+#     --a-env PYTHONPATH=/flagos/lib/python3.12/site-packages \
+#     --b-env PYTHONPATH=/flagos/lib/python3.12/site-packages \
+#     --gpus "$GPUS" --metrics latency --op-timeout 72000 --rounds 6 \
+#     --out runs/metax/ab_metax
+#
+# 对比（--drop-timer-mismatch：两侧计时口径不同的行不参与统计）：
+#   python ab_compare.py runs/metax/ab_metax --drop-timer-mismatch \
+#     --csv runs/metax/ab_metax/rows.csv
+
+# mm
+main:mm@mm
+
+# sparse_attn_triton
+#   备注：inventory 标记 marked_skip=yes
+main:sparse_attn_triton@sparse_attention
+
+# flash_attn_varlen_func
+vllm:flash_attn_varlen_func@flash_attn_varlen_func
+
+# fused_experts_impl
+main:fused_experts_impl_int8@fused_moe_int8
+vllm:fused_moe_impl_gems_vs_vllm@fused_moe
+vllm:fused_experts_impl_int8@fused_moe_int8
+
+# baddbmm
+main:baddbmm@baddbmm
+
+# bmm
+main:bmm@bmm
+
+# addmm
+main:addmm@addmm
+
+# mv
+main:mv@mv
+
+# fused_deepseek_v4_qnorm_rope_kv_rope_insert
+#   备注：vllm 仅有 ..._quant_insert 变体，无本算子
+main:fused_deepseek_v4_qnorm_rope_kv_rope_insert@fused_deepseek_v4_qnorm_rope_kv_rope_insert
+
+# moe_align_block_size
+#   备注：inventory 命名为 moe_align_block_size_triton
+main:moe_align_block_size_triton@moe_align_block_size_triton
+main:moe_align_block_size_fast_paths@moe_align_block_size_triton
+
+# topk
+#   备注：vllm 无同名算子（仅有 topk_softmax / top_k_per_row_* / persistent_topk）
+main:topk@topk
+
+# fused_add_rms_norm
+main:fused_add_rms_norm@fused_add_rms_norm
+vllm:fused_add_rms_norm@fused_add_rms_norm
+
+# per_token_group_quant_fp8
+main:per_token_group_quant_fp8@per_token_group_quant_fp8
+vllm:per_token_group_quant_fp8@per_token_group_quant_fp8
+
+# grouped_topk
+vllm:grouped_topk_no_renorm@grouped_topk
+vllm:grouped_topk_score_0@grouped_topk
+vllm:grouped_topk_score_1@grouped_topk
+
+# rms_norm
+#   备注：vllm 无同名算子（仅有 gemma_rms_norm / add_rms_norm 等）
+main:rms_norm@rms_norm
+
+# mhc_pre
+main:mhc_pre@mhc
+vllm:mhc_pre@mhc
+
+# mhc_post
+main:mhc_post@mhc
+
+# mul
+main:mul@mul
+
+# router_gemm
+main:perf_router_gemm@blas_perf_parallel
+
+# fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
+vllm:fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert@fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
+
+# fused_inv_rope_fp8_quant
+vllm:fused_inv_rope_fp8_quant@fused_inv_rope_fp8_quant
+
+# pack_seq_triton
+main:pack_seq@pack_seq
+main:pack_seq_int8@pack_seq
+vllm:pack_seq@pack_seq
+vllm:pack_seq_fp8@pack_seq
+vllm:pack_seq_int8@pack_seq
+
+# unpack_seq_triton
+main:unpack_seq@unpack_seq
+main:unpack_seq_int8@unpack_seq
+vllm:unpack_seq@unpack_seq
+vllm:unpack_seq_fp8@unpack_seq
+vllm:unpack_seq_int8@unpack_seq
+
+# indexer_k_quant_and_cache
+#   备注：inventory 的 op 带 _benchmark 后缀，op_names 为空
+vllm:indexer_k_quant_and_cache_benchmark@indexer_k_quant_and_cache
+
+# combine_topk_swa_indices
+#   备注：inventory 的 op 带 _benchmark 后缀，op_names 为空
+vllm:combine_topk_swa_indices_benchmark@deepseek_v4_attention_combine_topk_swa_indices
+
+# group_mm
+#   备注：inventory 命名为 grouped_mm；vllm 无
+main:grouped_mm@grouped_mm
+
+# compute_global_topk_indices_and_lens
+vllm:compute_global_topk_indices_and_lens_benchmark@deepseek_v4_attention_compute_global_topk_indices_and_lens
+
+# dequantize_and_gather_k_cache
+vllm:dequantize_and_gather_k_cache_benchmark@deepseek_v4_attention_dequantize_and_gather_k_cache
+
+# apply_rotary_pos_emb
+main:apply_rotary_pos_emb@apply_rotary_pos_emb
+vllm:apply_rotary_pos_emb@apply_rotary_pos_emb
+
+# conv2d
+#   备注：vllm 无
+main:conv2d@conv2d
+
+# glu
+#   备注：vllm 无（仅有 geglu / reglu / dgeglu 等变体）
+main:glu@glu
+
+# add_rms_norm
+main:add_rms_norm@add_rms_norm
+vllm:add_rms_norm@add_rms_norm
+
+# chunk_gated_delta_rule_fwd
+#   备注：ascend 变体
+main:perf_chunk_gated_delta_rule_fwd@FLA/test_chunk_gated_delta_rule_fwd
+
+# topk_softplus_sqrt
+#   备注：vllm 另有 _tle / _hash 变体，未列
+main:topk_softplus_sqrt@topk_softplus_sqrt
+vllm:topk_softplus_sqrt@topk_softplus_sqrt
+
+# top_k_per_row_decode
+vllm:top_k_per_row_decode@top_k_per_row_decode
+
+# top_k_per_row_prefill
+vllm:top_k_per_row_prefill@top_k_per_row_prefill
+
+# moe_sum
+main:moe_sum@moe_sum
+vllm:moe_sum@moe_sum
+
+# persistent_topk
+#   备注：仅 vllm
+vllm:persistent_topk@persistent_topk
+
+# ==============================================================================
+# 被剔除的 64 条（A 轮 SKIP/FAIL，与 RLC 无关）
+# 修好对应原因后，把该行移回上面的分组，或用 --ops 单独点名复跑。
+# ==============================================================================
+
+# ---- 架构 / 厂商专属
+# SKIP main:fused_moe_fp8@fused_moe_fp8
+#        requires vLLM + NVIDIA Hopper for FP8
+# SKIP main:fused_moe_fp8_blockwise@fused_moe_fp8_blockwise
+#        requires vLLM + Hopper for FP8 blockwise
+# SKIP main:fused_moe_int4_w4a16@fused_moe_int4_w4a16
+#        requires NVIDIA Hopper
+# SKIP main:fused_experts_impl_int8_w8a16@fused_moe_int8_w8a16
+#        requires NVIDIA Hopper
+# SKIP vllm:fused_moe_fp8@fused_moe_fp8
+#        requires vLLM + 原生 FP8 支持
+# SKIP vllm:fused_moe_fp8_blockwise@fused_moe_fp8_blockwise
+#        requires vLLM + 原生 FP8 + block-wise quant
+# SKIP vllm:fused_moe_int4_w4a16@fused_moe_int4_w4a16
+#        requires NVIDIA Hopper
+# SKIP main:grouped_topk_no_renorm@grouped_topk
+#        上游厂商 skipif #2891 + _metax 黑名单 All dtypes failed
+# SKIP main:grouped_topk_score_0@grouped_topk
+#        同上
+# SKIP main:grouped_topk_score_1@grouped_topk
+#        同上
+# SKIP main:fused_marlin_moe_w4a16_int4@fused_marlin_moe_w4a16_int4
+#        requires NVIDIA Hopper
+# SKIP vllm:fused_marlin_moe_w4a16_int4@fused_marlin_moe_w4a16_int4
+#        requires Hopper / Hygon / Moore Threads
+# SKIP main:fused_marlin_moe_w4a16_mxfp4@fused_marlin_moe_w4a16_mxfp4
+#        requires NVIDIA Hopper
+# SKIP vllm:fused_marlin_moe_w4a16_mxfp4@fused_marlin_moe_w4a16_mxfp4
+#        requires Hopper 或 Hygon
+# SKIP main:fused_marlin_moe_w8a16_int8@fused_marlin_moe_w8a16_int8
+#        requires NVIDIA Hopper
+# SKIP vllm:fused_marlin_moe_w8a16_int8@fused_marlin_moe_w8a16_int8
+#        requires Hopper 或 Hygon
+# SKIP main:fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert@fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
+#        fp8e4nv 需 capability >= 8.9
+# SKIP main:pack_seq_fp8@pack_seq
+#        requires vLLM + Hopper for FP8
+# SKIP main:unpack_seq_fp8@unpack_seq
+#        requires vLLM + Hopper for FP8
+# SKIP main:indexer_k_quant_and_cache_benchmark@indexer_k_quant_and_cache
+#        fp8e4nv 需 device capability >= 8.9
+# SKIP main:fp8_fp4_mega_moe_torch_ref@fp8_fp4_mega_moe
+#        需 CUDA 原生 FP8（SM90+）
+
+# ---- 缺第三方实现
+# SKIP vllm:perf_w8a8_block_fp8_matmul@blas_perf_parallel
+#        FlagGems-vllm 未实现，test_blas_perf_parallel.py:1349 主动 skip
+# SKIP vllm:flash_mla_sparse_fwd@flash_mla_sparse_fwd
+#        vllm._flashmla_C 未编译（无 nvcc / 架构不在目标列表）
+# SKIP vllm:mhc_post@mhc
+#        无 metax 原生 mhc_post kernel
+# SKIP main:perf_fp8_einsum_gems_vs_deepgemm@fp8_einsum
+#        requires DeepGEMM + Hopper + Triton>=3.6 with TLE
+# SKIP vllm:perf_fp8_einsum_gems_vs_vllm@fp8_einsum
+#        requires Hopper + vLLM DeepGEMM
+# SKIP main:fused_inv_rope_fp8_quant@fused_inv_rope_fp8_quant
+#        vLLM fused_inv_rope_fp8_quant 未安装
+# SKIP main:combine_topk_swa_indices_benchmark@deepseek_v4_attention_combine_topk_swa_indices
+#        需 cuda + vllm deepseek_v4_ops.combine_topk_swa_indices
+# SKIP main:swiglu@swiglu
+#        无 TransformerEngine swiglu / torch_npu.npu_swiglu
+# SKIP vllm:swiglu@swiglu
+#        同上
+# SKIP main:compute_global_topk_indices_and_lens_benchmark@deepseek_v4_attention_compute_global_topk_indices_and_lens
+#        需 cuda + vllm deepseek_v4_ops.compute_global_topk_indices_and_lens
+# SKIP main:dequantize_and_gather_k_cache_benchmark@deepseek_v4_attention_dequantize_and_gather_k_cache
+#        需 cuda fp8e4nv + vllm deepseek_v4_ops.dequantize_and_gather_k_cache
+# SKIP main:fused_q_kv_rmsnorm_benchmark@deepseek_v4_attention_fused_q_kv_rmsnorm
+#        需 cuda + vllm deepseek_v4_ops.fused_q_kv_rmsnorm
+# SKIP main:flash_mla_with_kvcache@flash_mla_with_kvcache
+#        vLLM FlashMLA 未安装
+# SKIP vllm:flash_mla_with_kvcache@flash_mla_with_kvcache
+#        同上
+# SKIP vllm:perf_chunk_gated_delta_rule_fwd_ascend@FLA/test_chunk_gated_delta_rule_ascend
+#        需 vllm-ascend FLA ops
+# SKIP main:fp8_fp4_mega_moe_vllm@fp8_fp4_mega_moe
+#        需 vLLM DeepGEMM MegaMoE
+# FAIL main:fp8_fp4_paged_mqa_logits@fp8_fp4_paged_mqa_logits
+#        DeepGEMM backend 不可用或 API 不匹配
+# FAIL vllm:fp8_fp4_paged_mqa_logits@fp8_fp4_paged_mqa_logits
+#        收集期 ModuleNotFoundError: vllm.third_party.deep_gemm（经 tests/ 跨目录 import）
+# SKIP main:fp8_fp4_mqa_logits@fp8_fp4_mqa_logits
+#        需 vLLM DeepGEMM + FP8 quant
+# FAIL vllm:fp8_fp4_mqa_logits@fp8_fp4_mqa_logits
+#        ModuleNotFoundError: vllm.third_party.deep_gemm
+
+# ---- 版本不匹配
+# SKIP main:cp_gather_indexer_k_quant_cache_benchmark@cp_gather_indexer_k_quant_cache
+#        只支持 vLLM CUDA >= 0.20.2 且 < 0.21.0
+# SKIP vllm:cp_gather_indexer_k_quant_cache_benchmark@cp_gather_indexer_k_quant_cache
+#        同上
+# FAIL vllm:perf_chunk_gla@FLA/test_chunk_gla_perf
+#        本机 fla 版本缺 state_v_first 形参（TypeError）
+
+# ---- MACA 资源上限（shared memory / threads）
+# FAIL main:flash_mla_sparse_fwd@flash_mla_sparse_fwd
+#        shared memory 188416 B > 65536 B 上限
+# FAIL main:flash_attn_varlen_func@flash_attn_varlen_func
+#        shared memory 73728 B > 65536 B（启发式 num_stages=3，dismiss 已记）
+# FAIL main:fused_moe_impl_gems_vs_vllm@fused_moe
+#        shared memory 73728 B > 65536 B
+# FAIL vllm:perf_router_gemm@blas_perf_parallel
+#        shared memory 98304 B > 65536 B
+# FAIL vllm:perf_router_gemm@router_gemm
+#        shared memory 98304 B > 65536 B
+# FAIL main:top_k_per_row_decode@top_k_per_row_decode
+#        threads 1024 > 512 上限
+# FAIL main:top_k_per_row_prefill@top_k_per_row_prefill
+#        threads 1024 > 512 上限
+# FAIL main:flash_mla@flash_mla
+#        shared memory 92160 B > 65536 B
+
+# ---- MACA 编译器 / 后端缺口
+# FAIL main:perf_router_gemm@router_gemm
+#        上游硬编码 Hopper TMA kernel，MACA 无 tt.descriptor_load lowering
+# FAIL vllm:perf_chunk_gated_delta_rule_fwd@FLA/test_chunk_gated_delta_rule_fwd
+#        TLEUnsupportedPrimitiveError: backend 'metax' 不支持 TLE primitive 'load'
+# FAIL vllm:flash_mla@flash_mla
+#        TLE builder 缺 make_nv_mma_shared_encoding_attr
+# FAIL vllm:chunk_gdn2@FLA/test_chunk_gdn2
+#        MACA MMA 无 fp16 累加（out_dtype=tl.float16 -> MMAMACA.cpp:87/114）
+# FAIL vllm:chunk_kda@FLA/test_chunk_kda
+#        TLE builder 缺 make_nv_mma_shared_encoding_attr
+
+# ---- fp8 dot 路径
+# FAIL main:perf_w8a8_block_fp8_matmul@blas_perf_parallel
+#        fp8 dot 无 MACA MMA，降级 FMA 后 FlagTree DotOpToLLVM/FMA.cpp:53 断言失败
+# FAIL main:perf_w8a8_block_fp8_matmul@w8a8_block_fp8_matmul
+#        同上（两个入口同一份 kernel）
+
+# ---- 上游 benchmark 缺陷
+# FAIL vllm:perf_w8a8_block_fp8_matmul@w8a8_block_fp8_matmul
+#        flaggems_vllm 无 w8a8_block_fp8_matmul 属性（AttributeError）
+# SKIP vllm:sparse_attn_triton@sparse_attention
+#        上游 #2669：用例多异常，skip
+# FAIL vllm:fused_q_kv_rmsnorm_benchmark@deepseek_v4_attention_fused_q_kv_rmsnorm
+#        vendor if/elif 链缺 else -> _HAS_REFERENCE 误为 True -> NameError
+# FAIL vllm:gemma_rms_norm@gemma_rms_norm
+#        vendor if/elif 链缺 else -> HAS_BASELINE_OP 误为 True -> NameError
+
+# ---- 设备端崩溃
+# FAIL vllm:moe_align_block_size_triton@moe_align_block_size_triton
+#        4-stage stage4 越界写 -> ATU fault -> SIGSEGV(139)，会污染 GPU context

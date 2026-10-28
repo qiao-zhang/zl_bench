@@ -30,11 +30,25 @@ Independent recheck of weak results, on fresh rounds:
 
 A faster/slower row (not a control) is weak if |gap| < --weak-gap (2%), |gap| < 2x
 the larger coefficient of variation of its two samples, or its table was timed by
-plain do_bench. With
+plain do_bench. Timing is read per round: a row whose two sides timed the same round
+differently (one captured a CUDA graph, the other fell back to plain do_bench) has no
+comparable gap at all -- the report counts those rows, --csv carries `timer`
+(graph / do_bench / mixed) plus `timer_rounds` naming the rounds behind a mixed one, and
+--drop-timer-mismatch removes them from the analysis. --csv also writes `gap_confirmed`
+(no/yes) and puts `unconfirmed` into `flags` for every row whose gap is no evidence of a
+kernel difference: its timing mixed two clocks, or the recheck did not settle the verdict
+(see UNCONFIRMED_CONFIRMS). A round only one side finished
+never decides anything: it does not count for the row and it does not mark it.
+With
 --confirm, every row is judged on the other rounds first; each faster/slower row with
 samples in the confirm rounds is then confirmed only if those rounds alone show a gap
 beyond the threshold in the same direction with a one-sided Mann-Whitney
-p < --confirm-alpha (0.05). Confirmed rows report the gap over all rounds; rows that are
+p < --confirm-alpha (0.05). A recheck is judged in this order: first whether its own
+rounds were timed consistently (`timer_mismatch`), then whether it has at least three
+rounds (`insufficient_rounds`), and only then the verdict — neither of the first two
+confirms or merges anything, and --recheck-list keeps `insufficient_rounds` rows so
+`ab_run.py --add-rounds` can extend them.
+Confirmed rows report the gap over all rounds; rows that are
 not reproduced become undecided.
 
 Single comparison of two run dirs or two run_batch.py batch dirs (one sample per
@@ -46,7 +60,9 @@ row, no verdict; B usually replayed A's record):
 Ratio = A/B Gems latency (>1 means B is faster). Rows are paired by (table op_name,
 dtype, row index) and count only if SUCCESS on both sides. A single comparison is a
 screen: run-to-run noise and per-GPU bias are a few percent; use ab_run.py for
-conclusions.
+conclusions. A row whose table one side timed with a CUDA graph and the other with
+plain do_bench is counted on that op's line as `timer_mismatch N rows`, and the
+summary repeats the total.
 """
 
 from __future__ import annotations
@@ -137,23 +153,44 @@ def _fallback(run_dir: Path) -> bool:
 
 # ---------------- single comparison ----------------
 
+def _direct_tables(run_dir: Path) -> set:
+    """(op_name, dtype) tables this run timed by plain do_bench instead of a CUDA graph."""
+    log = run_dir / "run.log"
+    if not log.is_file():
+        return set()
+    return nocg_tables(log.read_text(errors="replace"))
+
+
 def compare_pair(a_dir: Path, b_dir: Path, label: str, thr: float,
-                 verbose: bool) -> Optional[Tuple[float, int]]:
+                 verbose: bool) -> Optional[Tuple[float, int, int]]:
+    """Screen one op pair. Returns (geomean, rows, timer-mismatch rows).
+
+    A row whose table one side captured in a CUDA graph and the other timed by plain
+    do_bench carries the difference between two clocks, not between two kernels, so it
+    is counted separately instead of silently entering the geomean."""
     a, b = load_rows(a_dir), load_rows(b_dir)
     keys = [k for k in a if k in b]
     if not keys:
         return None
+    direct_a, direct_b = _direct_tables(a_dir), _direct_tables(b_dir)
+    mismatched = {k for k in keys if (k[:2] in direct_a) != (k[:2] in direct_b)}
     ratios = [a[k][0] / b[k][0] for k in keys]
     gm = ab_stats.geomean(ratios)
-    flag = "  [replay_fallback]" if _fallback(b_dir) else ""
+    flags = []
+    if mismatched:
+        flags.append(f"timer_mismatch {len(mismatched)} rows")
+    if _fallback(b_dir):
+        flags.append("replay_fallback")
+    flag = "  [" + ", ".join(flags) + "]" if flags else ""
     print(f"{label:60s} rows={len(keys):4d} geomean={gm:.3f} "
           f"min={min(ratios):.3f} max={max(ratios):.3f}{flag}")
     if verbose:
         for k, r in zip(keys, ratios, strict=True):
             if abs(r - 1) >= thr:
+                mark = "  [timer_mismatch]" if k in mismatched else ""
                 print(f"    {r:6.3f}  {a[k][0]:.6f} -> {b[k][0]:.6f}  {k[0]} {k[1]} "
-                      f"#{k[2]} {a[k][1][:100]}")
-    return gm, len(keys)
+                      f"#{k[2]} {a[k][1][:100]}{mark}")
+    return gm, len(keys), len(mismatched)
 
 
 def single(args: argparse.Namespace) -> None:
@@ -174,6 +211,12 @@ def single(args: argparse.Namespace) -> None:
     print(f"== {len(results)} ops, geomean of per-op geomeans {gm:.4f}; "
           f"<0.97: {sum(r[0] < 0.97 for r in results)}, "
           f">1.03: {sum(r[0] > 1.03 for r in results)}")
+    mism = sum(r[2] for r in results)
+    if mism:
+        ops_m = sum(1 for r in results if r[2])
+        print(f"== timer mismatch (one side graph, the other plain do_bench): {mism} rows in "
+              f"{ops_m} ops -> those ratios compare two clocks, not two kernels; re-record "
+              "both sides the same way or use ab_run.py")
 
 
 # ---------------- repeated-measures A/B ----------------
@@ -225,8 +268,80 @@ class Row(NamedTuple):
     a: List[float]
     b: List[float]
     rounds: List[int]  # rounds with a sample on both sides
-    nocg: bool         # its table had a sample timed by plain do_bench (marked per table)
+    nocg: bool         # a counted round timed the table by plain do_bench (either side)
     fallback: bool     # a side did not replay every recorded config
+    nocg_a: bool = False   # A timed it by plain do_bench in at least one counted round
+    nocg_b: bool = False   # B timed it by plain do_bench in at least one counted round
+    # (round, A plain do_bench, B plain do_bench) for the rounds that count, in order.
+    # Kept per round because the fallback belongs to a measurement, not to the op: a
+    # round only one side finished must not decide anything (see timer_mismatch).
+    direct_rounds: Tuple[Tuple[int, bool, bool], ...] = ()
+
+
+def _marks(direct_rounds: Tuple[Tuple[int, bool, bool], ...]) -> Tuple[bool, bool, bool]:
+    """(nocg, nocg_a, nocg_b) of a row, from the marks of its counted rounds."""
+    a = any(da for _, da, _ in direct_rounds)
+    b = any(db for _, _, db in direct_rounds)
+    return a or b, a, b
+
+
+def timer_mode(row: Row) -> str:
+    """How this row was timed: "graph", "do_bench" or "mixed".
+
+    graph     every counted round captured a CUDA graph on both sides
+    do_bench  every counted round timed with plain do_bench on both sides
+    mixed     anything else: a round where the sides differ (that gap mixes two clocks),
+              or counted rounds that disagree with one another"""
+    pairs = {(da, db) for _, da, db in row.direct_rounds}
+    if pairs == {(True, True)}:
+        return "do_bench"
+    if pairs <= {(False, False)}:
+        return "graph"
+    return "mixed"
+
+
+def timer_mismatch(row: Row) -> bool:
+    """True when one side timed a counted round with a CUDA graph and the other with plain
+    do_bench. Judged per round, not on the whole run: a table that fell back on A in one
+    round and on B in another is mismatched in both, and a round only one side finished
+    says nothing about the rounds that count.
+
+    `report()` counts these rows, `write_csv()` flags them, and
+    `analyze(drop_timer_mismatch=True)` removes them."""
+    return any(da != db for _, da, db in row.direct_rounds)
+
+
+# confirm= states in which the row's numbers must not be read as a measured gain/loss.
+# Kept in sync with rlc_report.CONFIRM_REASONS, which adds the Chinese note titles.
+UNCONFIRMED_CONFIRMS = ("timer_mismatch", "insufficient_rounds", "not_reproduced")
+
+
+def row_unconfirmed(row: Row, confirm: str = "") -> bool:
+    """True when the row's numbers are no evidence of a kernel difference.
+
+    Either its own timing mixed two clocks (`timer_mismatch`), or the recheck settled
+    nothing / refuted the verdict (`confirm` in UNCONFIRMED_CONFIRMS, passed from the
+    Result since confirm belongs to the comparison, not to the samples). write_csv()
+    puts `unconfirmed` into `flags` and `no` into `gap_confirmed` for these rows, so a
+    reader that never looks at `confirm` still sees that the gap is not confirmed."""
+    return timer_mismatch(row) or confirm in UNCONFIRMED_CONFIRMS
+
+
+def timer_detail(row: Row) -> str:
+    """The counted rounds behind a `mixed` timer: "k:a+b" both sides plain do_bench,
+    "k:a" / "k:b" one side only, in round order. Empty unless timer_mode() is mixed;
+    counted rounds it does not name captured a graph on both sides."""
+    if timer_mode(row) != "mixed":
+        return ""
+    parts = []
+    for k, da, db in row.direct_rounds:
+        if da and db:
+            parts.append(f"{k}:a+b")
+        elif da:
+            parts.append(f"{k}:a")
+        elif db:
+            parts.append(f"{k}:b")
+    return ",".join(parts)
 
 
 def load_samples(ab_dir: Path, rng: Optional[Tuple[int, int]] = None,
@@ -235,12 +350,16 @@ def load_samples(ab_dir: Path, rng: Optional[Tuple[int, int]] = None,
     its sides measured the row."""
     per: Dict[Tuple[str, str, str, int], Dict[int, Dict[str, float]]] = defaultdict(dict)
     size: Dict[Tuple[str, str, str, int], str] = {}
-    nocg, fallback = set(), set()
+    # Per round and side: the (run, op_name, dtype) tables that fell back to plain
+    # do_bench. Recorded per round because it belongs to a measurement, not to the op:
+    # a round only one side finished is recorded but never consulted.
+    nocg: Dict[str, Dict[int, set]] = {"a": {}, "b": {}}
+    fallback = set()
     for k, side, d in round_dirs(ab_dir, rng, exclude):
         for run_dir in sorted(p for p in d.glob("*/*") if (p / "run.log").is_file()):
             run = f"{run_dir.parent.name}/{run_dir.name}"
             text = (run_dir / "run.log").read_text(errors="replace")
-            nocg |= {(run,) + t for t in nocg_tables(text)}
+            nocg[side].setdefault(k, set()).update({(run,) + t for t in nocg_tables(text)})
             if FALLBACK in text:
                 fallback.add(run)
             for (op_name, dtype, i), (lat, sz) in load_rows(run_dir).items():
@@ -252,9 +371,13 @@ def load_samples(ab_dir: Path, rng: Optional[Tuple[int, int]] = None,
         rounds = sorted(k for k, s in by_round.items() if len(s) == 2)
         if not rounds:
             continue
+        direct = tuple(
+            (k, key[:3] in nocg["a"].get(k, ()), key[:3] in nocg["b"].get(k, ()))
+            for k in rounds)
+        nocg_all, direct_a, direct_b = _marks(direct)
         rows.append(Row(*key, size[key], [by_round[k]["a"] for k in rounds],
                         [by_round[k]["b"] for k in rounds], rounds,
-                        key[:3] in nocg, key[0] in fallback))
+                        nocg_all, key[0] in fallback, direct_a, direct_b, direct))
     return rows
 
 
@@ -286,10 +409,14 @@ class Result(NamedTuple):
 
 
 def analyze(ab_dir: Path, gate_dir: Optional[Path] = None, rng: Optional[Tuple[int, int]] = None,
-            exclude: Optional[Tuple[int, int]] = None, **rule) -> List[Result]:
+            exclude: Optional[Tuple[int, int]] = None,
+            drop_timer_mismatch: bool = False, **rule) -> List[Result]:
     gate = load_gate(gate_dir) if gate_dir else None
+    rows = load_samples(ab_dir, rng, exclude)
+    if drop_timer_mismatch:
+        rows = [r for r in rows if not timer_mismatch(r)]
     out = []
-    for row in load_samples(ab_dir, rng, exclude):
+    for row in rows:
         out.append(Result(row, ab_stats.compare(row.a, row.b, **rule),
                           gate_flag(gate, row) if gate is not None else ""))
     return out
@@ -297,34 +424,73 @@ def analyze(ab_dir: Path, gate_dir: Optional[Path] = None, rng: Optional[Tuple[i
 
 def is_weak(r: Result, weak_gap: float) -> bool:
     """A faster/slower row whose evidence is thin: a small gap, a gap within twice the
-    samples' coefficient of variation, or timing by plain do_bench."""
+    samples' coefficient of variation, timing by plain do_bench, or two sides timed
+    by different clocks."""
     if r.stats.verdict not in ("faster", "slower"):
         return False
     cv = max(statistics.pstdev(x) / statistics.fmean(x) for x in (r.row.a, r.row.b))
-    return abs(r.stats.gap) < weak_gap or abs(r.stats.gap) < 2 * cv or r.row.nocg
+    return (abs(r.stats.gap) < weak_gap or abs(r.stats.gap) < 2 * cv
+            or r.row.nocg or timer_mismatch(r.row))
+
+
+def recheck_ops(results: List[Result], labels: Dict[str, str],
+                weak_gap: float) -> Tuple[List[str], int]:
+    """(ops, weak rows) a fresh-round recheck should target.
+
+    Every weak row of a changed (or unknown) kernel, except the ones more rounds cannot
+    fix: insufficient_rounds belongs here — more rounds is exactly what fixes it — while
+    timer_mismatch and not_reproduced do not improve with more rounds, so both stay out."""
+    weak = [r for r in results
+            if r.gate != "unchanged" and r.confirm in ("", "insufficient_rounds")
+            and is_weak(r, weak_gap)]
+    return sorted({labels.get(r.row.run, r.row.run) for r in weak}), len(weak)
 
 
 def confirm(ab_dir: Path, gate_dir: Optional[Path], rng: Tuple[int, int], confirm_alpha: float,
-            **rule) -> List[Result]:
+            drop_timer_mismatch: bool = False, **rule) -> List[Result]:
     """Judge every row on the rounds outside rng, then recheck its faster/slower verdict on
-    the rounds inside rng alone (one-sided, in the original direction)."""
-    main = analyze(ab_dir, gate_dir, exclude=rng, **rule)
+    the rounds inside rng alone (one-sided, in the original direction).
+
+    A recheck whose own rounds were timed inconsistently (one side graph, the other plain
+    do_bench) cannot confirm anything: it is reported as `timer_mismatch` and its samples
+    are not merged, whatever --drop-timer-mismatch says about the main rounds."""
+    main = analyze(ab_dir, gate_dir, exclude=rng,
+                   drop_timer_mismatch=drop_timer_mismatch, **rule)
     new = {(r.run, r.op_name, r.dtype, r.row): r for r in load_samples(ab_dir, rng)}
     out = []
     for r in main:
         n = new.get((r.row.run, r.row.op_name, r.row.dtype, r.row.row))
-        if r.stats.verdict not in ("faster", "slower") or n is None or len(n.rounds) < 3:
+        if r.stats.verdict not in ("faster", "slower") or n is None:
             out.append(r)
             continue
         alternative = "greater" if r.stats.verdict == "faster" else "less"
         p = ab_stats.mann_whitney_u(n.a, n.b, alternative)[1]
         gap = statistics.median(n.a) / statistics.median(n.b) - 1
-        ok = p < confirm_alpha and (gap > rule["threshold"] if r.stats.verdict == "faster"
-                            else gap < -rule["threshold"])
         stats_new = ab_stats.RowStats(len(n.a), len(n.b), statistics.median(n.a),
                                       statistics.median(n.b), gap, p, "")
+        # Timing first: a recheck that mixed two clocks says nothing whatever its round
+        # count, and it is the reason no confirmation is possible.
+        if timer_mismatch(n):
+            out.append(Result(r.row, r.stats, r.gate, "timer_mismatch", stats_new))
+            continue
+        # Then the round count. "no recheck was arranged" (confirm == "") and "arranged,
+        # but too short" have to stay distinguishable: the latter is what --add-rounds
+        # fixes, so --recheck-list keeps it.
+        if len(n.rounds) < 3:
+            out.append(Result(r.row, r.stats, r.gate, "insufficient_rounds", stats_new))
+            continue
+        ok = p < confirm_alpha and (gap > rule["threshold"] if r.stats.verdict == "faster"
+                            else gap < -rule["threshold"])
         if ok:
-            both = r.row._replace(a=r.row.a + n.a, b=r.row.b + n.b, rounds=r.row.rounds + n.rounds)
+            direct = r.row.direct_rounds + n.direct_rounds
+            nocg_all, direct_a, direct_b = _marks(direct)
+            # fallback stays a per-run warning (AUTOTUNE_REPLAY_FALLBACK names no round),
+            # so merging keeps it when either set of rounds tripped it: the merged samples
+            # contain live-tuned points either way.
+            both = r.row._replace(a=r.row.a + n.a, b=r.row.b + n.b,
+                                  rounds=r.row.rounds + n.rounds, nocg=nocg_all,
+                                  nocg_a=direct_a, nocg_b=direct_b, direct_rounds=direct,
+                                  fallback=r.row.fallback or n.fallback)
             all_stats = ab_stats.compare(both.a, both.b, **rule)._replace(verdict=r.stats.verdict)
             out.append(Result(both, all_stats, r.gate, "confirmed", stats_new))
         else:
@@ -419,6 +585,8 @@ def report(results: List[Result], labels: Dict[str, str], manifest: dict,
             flags = []
             if any(r.row.nocg for r in rs):
                 flags.append("do_bench")
+            if any(timer_mismatch(r.row) for r in rs):
+                flags.append("timer_mismatch")
             if any(r.row.fallback for r in rs):
                 flags.append("replay_fallback")
             fast_s = _pct(fast) if fast is not None else "-"
@@ -438,11 +606,34 @@ def report(results: List[Result], labels: Dict[str, str], manifest: dict,
     what = "rows with a changed kernel" if gated else "rows"
     print(f"\n== {what}: {len(tested)}; faster {v['faster']}, slower {v['slower']}, "
           f"same {v['same']}, undecided {v['undecided']}")
+    modes = Counter(timer_mode(r.row) for r in tested)
+    if modes.get("mixed") or modes.get("do_bench"):
+        print(f"   timing: graph {modes.get('graph', 0)}, do_bench {modes.get('do_bench', 0)}, "
+              f"mixed {modes.get('mixed', 0)}")
+    mismatch = [r for r in tested if timer_mismatch(r.row)]
+    if mismatch:
+        a_direct = sum(1 for r in mismatch if r.row.nocg_a)
+        b_direct = sum(1 for r in mismatch if r.row.nocg_b)
+        ops_m = len({r.row.run for r in mismatch})
+        print(f"   timer mismatch (one side graph, the other plain do_bench): "
+              f"{len(mismatch)} rows in {ops_m} ops "
+              f"(A do_bench {a_direct}, B do_bench {b_direct}) -> their gap is not comparable")
+        for label, op_name, dtype, detail in sorted({(labels.get(r.row.run, r.row.run),
+                                                      r.row.op_name, r.row.dtype,
+                                                      timer_detail(r.row))
+                                                     for r in mismatch})[:10]:
+            print(f"    {label} {op_name} {dtype}  rounds {detail}")
     rechecked = [r for r in tested if r.confirm]
     if rechecked:
-        kept = sum(r.confirm == "confirmed" for r in rechecked)
-        print(f"   rechecked on fresh rounds: {len(rechecked)}; confirmed {kept}, not reproduced "
-              f"{len(rechecked) - kept} (now undecided)")
+        counts = Counter(r.confirm for r in rechecked)
+        parts = [f"confirmed {counts.get('confirmed', 0)}"]
+        if counts.get("not_reproduced"):
+            parts.append(f"not reproduced {counts['not_reproduced']} (now undecided)")
+        if counts.get("timer_mismatch"):
+            parts.append(f"refused, timer mismatch {counts['timer_mismatch']}")
+        if counts.get("insufficient_rounds"):
+            parts.append(f"too few rounds {counts['insufficient_rounds']}")
+        print(f"   rechecked on fresh rounds: {len(rechecked)}; " + ", ".join(parts))
     if gated:
         unknown = sum(1 for r in tested if r.gate == "unknown")
         if unknown:
@@ -461,19 +652,25 @@ def report(results: List[Result], labels: Dict[str, str], manifest: dict,
 def write_csv(path: Path, results: List[Result], labels: Dict[str, str],
               manifest: dict) -> None:
     fields = ["op", "run", "op_name", "dtype", "row", "size_detail", "gate", "accuracy",
-              "rounds", "median_a_ms", "median_b_ms", "gap", "p", "verdict", "flags", "confirm",
-              "confirm_rounds", "confirm_gap", "confirm_p"]
+              "rounds", "median_a_ms", "median_b_ms", "gap", "p", "verdict", "flags",
+              "gap_confirmed", "timer", "timer_rounds", "confirm", "confirm_rounds",
+              "confirm_gap", "confirm_p"]
     with path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(fields)
         for r in results:
             flags = ";".join(x for x, on in (("do_bench", r.row.nocg),
+                                             ("timer_mismatch", timer_mismatch(r.row)),
+                                             ("unconfirmed",
+                                              row_unconfirmed(r.row, r.confirm)),
                                              ("replay_fallback", r.row.fallback)) if on)
             w.writerow([labels.get(r.row.run, r.row.run), r.row.run, r.row.op_name, r.row.dtype,
                         r.row.row, r.row.size, r.gate, accuracy_of(manifest, r.row.run),
                         r.stats.n_a, f"{r.stats.median_a:.6g}",
                         f"{r.stats.median_b:.6g}", f"{r.stats.gap:.6f}",
                         "" if math.isnan(r.stats.p) else f"{r.stats.p:.4g}", r.stats.verdict, flags,
+                        "no" if row_unconfirmed(r.row, r.confirm) else "yes",
+                        timer_mode(r.row), timer_detail(r.row),
                         r.confirm, r.new.n_a if r.new else "",
                         f"{r.new.gap:.6f}" if r.new else "", f"{r.new.p:.4g}" if r.new else ""])
 
@@ -515,6 +712,9 @@ def main() -> None:
                    help="recheck rounds: judge on the other rounds, confirm on these alone")
     p.add_argument("--confirm-alpha", type=float, default=0.05,
                    help="one-sided p a recheck must reach (default %(default)s)")
+    p.add_argument("--drop-timer-mismatch", action="store_true",
+                   help="drop rows whose two sides timed the table with different clocks "
+                        "(one graph, one plain do_bench): their gap is not comparable")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="list each faster / slower / undecided row")
     p.add_argument("--min", type=float, default=0.03,
@@ -524,8 +724,10 @@ def main() -> None:
     args = p.parse_args()
 
     if args.b is not None:
-        if args.gate or args.rounds or args.confirm or args.recheck_list or args.csv:
-            sys.exit("--gate, --rounds, --confirm, --recheck-list and --csv need an ab_run.py dir")
+        if (args.gate or args.rounds or args.confirm or args.recheck_list or args.csv
+                or args.drop_timer_mismatch):
+            sys.exit("--gate, --rounds, --confirm, --recheck-list, --csv and "
+                     "--drop-timer-mismatch need an ab_run.py dir (rounds on both sides)")
         single(args)
         return
     manifest_path = args.a / MANIFEST
@@ -535,9 +737,10 @@ def main() -> None:
         if args.rounds:
             sys.exit("--confirm and --rounds do not mix")
         results = confirm(args.a, args.gate, parse_range(args.confirm), args.confirm_alpha,
-                          **rule_of(args))
+                          drop_timer_mismatch=args.drop_timer_mismatch, **rule_of(args))
     else:
-        results = analyze(args.a, args.gate, parse_range(args.rounds), **rule_of(args))
+        results = analyze(args.a, args.gate, parse_range(args.rounds),
+                          drop_timer_mismatch=args.drop_timer_mismatch, **rule_of(args))
     if not results:
         sys.exit("no row has a sample on both sides")
     labels = op_labels(args.a)
@@ -547,11 +750,9 @@ def main() -> None:
         write_csv(args.csv, results, labels, manifest)
         print(f"== per-row statistics: {args.csv}")
     if args.recheck_list:
-        weak = [r for r in results
-                if r.gate != "unchanged" and not r.confirm and is_weak(r, args.weak_gap)]
-        ops = sorted({labels.get(r.row.run, r.row.run) for r in weak})
+        ops, rows = recheck_ops(results, labels, args.weak_gap)
         args.recheck_list.write_text("".join(f"{op}\n" for op in ops))
-        print(f"== {len(weak)} weak rows in {len(ops)} ops: {args.recheck_list}")
+        print(f"== {rows} weak rows in {len(ops)} ops: {args.recheck_list}")
 
 
 if __name__ == "__main__":

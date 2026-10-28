@@ -22,6 +22,17 @@ Definitions (matching the hand-made table):
   saving/cost         max(median(A) - median(B)) / max(median(B) - median(A))
   cvt     sum of ttg.convert_layout over the op's changed kernels, base -> new
 
+Rows kept out of the gain/loss and saving/cost figures — each with its own note giving
+the row count, and --include-unconfirmed counting them again:
+
+  timer_mismatch                 a counted round mixed a CUDA graph with plain do_bench
+  confirm=timer_mismatch         the recheck's own rounds mixed two clocks
+  confirm=insufficient_rounds    the recheck had fewer than three rounds
+  confirm=not_reproduced         the recheck did not reproduce the verdict
+
+A plain undecided row (no confirm) stays in the summaries: nothing was measured
+against it.
+
 The table only orders and names the ops when --table is given; every op found in
 the CSV is still reported. Rows whose dtype has no column here (float32, int32,
 ...) still count towards the op's saving/cost, and the note names them, so a
@@ -61,6 +72,9 @@ class Row(NamedTuple):
     gate: str
     flags: str
     verdict: str
+    # ab_compare.py --csv: "", confirmed, not_reproduced, or timer_mismatch (the recheck
+    # could not confirm because its own rounds mixed two clocks).
+    confirm: str = ""
 
 
 class Group(NamedTuple):
@@ -76,7 +90,8 @@ def read_ab_csv(path: Path) -> List[Row]:
             try:
                 out.append(Row(r["op"], r["run"], r["op_name"], r["dtype"], int(r["row"]),
                                float(r["gap"]), float(r["median_a_ms"]), float(r["median_b_ms"]),
-                               r.get("gate", ""), r.get("flags", ""), r.get("verdict", "")))
+                               r.get("gate", ""), r.get("flags", ""), r.get("verdict", ""),
+                               r.get("confirm") or ""))
             except (KeyError, ValueError) as exc:
                 raise SystemExit(f"{LOG} bad row in {path}: {r} ({exc})") from exc
     return out
@@ -267,10 +282,48 @@ def row_entry(table: Optional[Dict[Tuple[str, str, str, int], List[str]]],
     return table.get((run, op_name, dtype, row)) or table.get(("", op_name, dtype, row)) or []
 
 
+# confirm= states that mean the main-round verdict did not come out of the recheck, or
+# (not_reproduced) was rechecked and failed to reproduce. Each gets its own note and is
+# kept out of the gain/loss and saving/cost summaries unless --include-unconfirmed.
+CONFIRM_REASONS = {
+    "timer_mismatch": "复测计时口径不一致，主轮次结论未确认",
+    "insufficient_rounds": "复测样本不足，主轮次结论未确认",
+    "not_reproduced": "复测未重现",
+}
+
+
+def unconfirmed(row: Row) -> bool:
+    """A row whose numbers must not count as a measured gain or loss.
+
+    Either the row's own timing is not comparable (a counted round mixed a CUDA graph
+    with plain do_bench: the `timer_mismatch` flag), or the recheck settled nothing —
+    it mixed two clocks, it had too few rounds, or the verdict did not reproduce
+    (`confirm` in CONFIRM_REASONS). A plain undecided row (no `confirm`, e.g. too few
+    main rounds to decide anything) is *not* unconfirmed: nothing was measured against
+    it. The summaries skip unconfirmed rows by default; --include-unconfirmed puts them
+    back.
+
+    ab_compare.py --csv also writes `unconfirmed` into `flags` (and `no` into
+    `gap_confirmed`), so a CSV whose `confirm` column was dropped still marks them."""
+    flags = row.flags.split(";")
+    return (row.confirm in CONFIRM_REASONS or "unconfirmed" in flags
+            or "timer_mismatch" in flags)
+
+
 def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
-              notes: Dict[str, str], label: str) -> List[str]:
-    """The warnings a set of result rows carries: do_bench timing with its reason, a
-    replay/config mismatch, unchanged kernels despite a difference, the manual note.
+              notes: Dict[str, str], label: str, dropping: bool = True) -> List[str]:
+    """The warnings a set of result rows carries: do_bench timing with its reason, a timer
+    that differs between the two sides of a round, whatever the recheck settled (mixed
+    clocks, too few rounds, or not reproduced — one note each), a generic note for an
+    unconfirmed row whose reason this CSV does not carry (a dropped `confirm` column),
+    a replay/config mismatch, unchanged kernels despite a difference, the manual note.
+
+    They stay apart on purpose: a mismatched main round makes that row's gap
+    uncomparable, a refused recheck only means the main-round verdict was never
+    confirmed, and not_reproduced is the opposite of both — the verdict was tested on
+    fresh rounds and did not hold. `dropping` says what the summaries did with those rows
+    (they are excluded by default), so every note states whether its numbers contain
+    them, and how many.
 
     Both the dtype group and the op call this with the rows they own — the op with
     all of them — so a warning that only a row of a column-less dtype (float32, ...)
@@ -281,6 +334,28 @@ def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
         why = sorted({(reasons or {}).get(r.run, "") for r in rows
                       if "do_bench" in r.flags.split(";")} - {""})
         out.append("do_bench 计时" + (f"（{'；'.join(why)}）" if why else ""))
+    mismatched = [r for r in rows if "timer_mismatch" in r.flags.split(";")]
+    if mismatched:
+        tail = (f"未计入收益/损失汇总，{len(mismatched)} 行" if dropping else "仍计入汇总")
+        out.append(f"A/B 计时口径不一致，性能差异不可直接比较（{tail}）")
+    for reason, title in CONFIRM_REASONS.items():
+        hits = [r for r in rows if r.confirm == reason]
+        if not hits:
+            continue
+        tail = (f"{len(hits)} 行，未计入汇总" if dropping
+                else f"{len(hits)} 行，仍计入汇总")
+        out.append(f"{title}（{tail}）")
+    # Rows marked unconfirmed but carrying no reason this report can name: a --csv whose
+    # `confirm` column was dropped (only `flags=unconfirmed` survives), or a state a newer
+    # ab_compare.py writes. They are excluded all the same, so say so instead of leaving
+    # the note silent about why their numbers are missing.
+    generic = [r for r in rows
+               if unconfirmed(r) and r.confirm not in CONFIRM_REASONS
+               and "timer_mismatch" not in r.flags.split(";")]
+    if generic:
+        tail = (f"{len(generic)} 行，未计入汇总" if dropping
+                else f"{len(generic)} 行，仍计入汇总")
+        out.append(f"结果未确认（{tail}）")
     if "replay_fallback" in flags:
         out.append("replay 回退，config 不一致")
     if rows and all(r.gate == "unchanged" for r in rows) and \
@@ -295,9 +370,14 @@ def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
 def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]],
                 gate_dir: Optional[Path], notes: Dict[str, str], label: str,
                 group: str, reasons: Optional[Dict[str, str]] = None,
-                kernels: Optional[Dict[Tuple[str, str, str, int], List[str]]] = None) -> dict:
-    gains = [r for r in rows if r.gap > 0]
-    losses = [r for r in rows if r.gap < 0]
+                kernels: Optional[Dict[Tuple[str, str, str, int], List[str]]] = None,
+                include_unconfirmed: bool = False) -> dict:
+    # Rows with a timer mismatch stay in `rows` (the table still counts them and warns
+    # about them) but are left out of the gain/loss ranges: their gap compares two clocks,
+    # or its verdict was never confirmed by the recheck.
+    counted = rows if include_unconfirmed else [r for r in rows if not unconfirmed(r)]
+    gains = [r for r in counted if r.gap > 0]
+    losses = [r for r in counted if r.gap < 0]
     total = len(rows)
     changed_hashes = sorted({h for r in rows
                              for h in row_entry(gate, r.run, r.op_name, r.dtype, r.row)})
@@ -309,7 +389,7 @@ def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]
     cvt_before = cvt_after = None
     if hashes:
         cvt_before, cvt_after = cvt_counts(gate_dir, hashes)
-    note = row_notes(rows, reasons, notes, label)
+    note = row_notes(rows, reasons, notes, label, dropping=not include_unconfirmed)
     return {
         "rows": total,
         "dtypes": sorted({r.dtype for r in rows}),
@@ -349,7 +429,8 @@ def ungrouped_note(rows: List[Row]) -> str:
 def op_entry(label: str, rows: List[Row], groups: Dict[str, List[Row]],
              gate: Dict[Tuple[str, str, str, int], List[str]],
              gate_dir: Optional[Path], notes: Dict[str, str], reasons: Dict[str, str],
-             kernels: Dict[Tuple[str, str, str, int], List[str]]) -> dict:
+             kernels: Dict[Tuple[str, str, str, int], List[str]],
+             include_unconfirmed: bool = False) -> dict:
     """One table row: the per-dtype statistics of the op, plus its saving/cost and
     its warnings over every row it has — rows of a dtype without a column included.
 
@@ -358,14 +439,20 @@ def op_entry(label: str, rows: List[Row], groups: Dict[str, List[Row]],
     manual note) still reaches the table: those rows are in no group's note. A
     warning only *one dtype's* rows produce is kept too, prefixed with that dtype
     ("bf16 指令未增删"): the table has one note per op, and "these rows kept their
-    kernels" stops being true for the op as soon as another dtype changed."""
-    stats = {group: summarizing(rs, gate, gate_dir, notes, label, group, reasons, kernels)
+    kernels" stops being true for the op as soon as another dtype changed.
+
+    The gain/loss and saving/cost figures skip rows with a timer mismatch unless
+    include_unconfirmed is set, and the note says how many rows were left out."""
+    stats = {group: summarizing(rs, gate, gate_dir, notes, label, group, reasons, kernels,
+                                include_unconfirmed=include_unconfirmed)
              for group, rs in groups.items()}
-    saving = max((r.a_ms - r.b_ms for r in rows), default=0.0)
-    cost = max((r.b_ms - r.a_ms for r in rows), default=0.0)
-    merged = row_notes(rows, reasons, notes, label)
+    counted = rows if include_unconfirmed else [r for r in rows if not unconfirmed(r)]
+    saving = max((r.a_ms - r.b_ms for r in counted), default=0.0)
+    cost = max((r.b_ms - r.a_ms for r in counted), default=0.0)
+    merged = row_notes(rows, reasons, notes, label, dropping=not include_unconfirmed)
     for group, group_rows in groups.items():
-        for text in row_notes(group_rows, reasons, notes, label):
+        for text in row_notes(group_rows, reasons, notes, label,
+                              dropping=not include_unconfirmed):
             labelled = f"{group} {text}"
             if text not in merged and labelled not in merged:
                 merged.append(labelled)
@@ -523,6 +610,11 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=Path("rlc_report.xlsx"))
     p.add_argument("--title", default="RLC Enhance 开启前后算子性能对比")
     p.add_argument("--env", default="", help="environment line under the title")
+    p.add_argument("--include-unconfirmed", action="store_true",
+                   help="count rows with a timer mismatch (a round that mixed a CUDA graph "
+                        "with plain do_bench, or a recheck that could not confirm) in the "
+                        "gain/loss and saving/cost summaries; by default they are excluded "
+                        "and the note says how many")
     args = p.parse_args()
 
     rows = read_ab_csv(args.csv)
@@ -556,7 +648,8 @@ def main() -> None:
     for label in labels:
         out.append({"name": display_name(label, op_names, sources, op_files),
                     **op_entry(label, by_label[label], grouped[label], gate, args.gate,
-                               notes, reasons, kernels)})
+                               notes, reasons, kernels,
+                               include_unconfirmed=args.include_unconfirmed)})
 
     write_xlsx(args.out, out, args.title, args.env)
     print(f"{LOG} {len(out)} ops, {len(rows)} rows -> {args.out}", flush=True)
