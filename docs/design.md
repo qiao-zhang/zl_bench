@@ -9,6 +9,7 @@ How zl_bench gets comparable numbers out of the FlagGems benchmarks, and what to
 - [Timing](#timing)
 - [IR dump](#ir-dump)
 - [Statistics](#statistics)
+- [Accuracy gate](#accuracy-gate)
 - [Shape override](#shape-override)
 - [Parallel sweep](#parallel-sweep)
 - [Upstream assumptions](#upstream-assumptions)
@@ -135,6 +136,17 @@ With `--gate`, rows whose kernels compiled to identical binaries on both sides c
 `--until-decided` adds rounds to ops with undecided rows. Testing again after each addition inflates the false-positive rate a little (sequential testing); the controls, which get the same extra rounds, show by how much.
 
 A row near the threshold, or decided on few rounds, has been both selected and judged on the same samples, which overstates small effects (the winner's curse). The fix is an independent check: `ab_run.py --add-rounds N` runs N new rounds, and `ab_compare.py --confirm` judges each faster/slower row on those alone, with a one-sided test in the original direction at α = 0.05. One-sided is right because the direction was fixed before the new data existed; a row that passes both tests is a false positive only if both are, which the independence of the new rounds makes rare. A confirmed row reports the gap over all rounds; a row that is not reproduced becomes undecided rather than same, since a small real effect can also miss on a few rounds.
+
+## Accuracy gate
+
+`ab_run.py --accuracy-gate` runs each side's unit test for an op before the first round and drops the op from the A/B when a side does not pass it. An A/B compares latency and nothing else: upstream's `benchmark/base.py` asserts nothing about the numbers (`torch_op` is only the baseline it times), so a compiler that changes an op's arithmetic still yields timing rows on both sides, and the report would call the difference a speedup. The gate is what stands between a numerical regression and a performance verdict.
+
+- **What runs.** `tests/test_<op_file>.py::test_<op>` of the case's repo (`op_file` keeps a benchmark subdir, so `benchmark/test_FLA/test_x.py` maps to `tests/test_FLA/test_x.py`), in a fresh process with `cwd` at the repo root, that side's `PYTHONPATH` and `--a-env` / `--b-env`, and one GPU. Same test a developer runs by hand, so it carries the repo's own tolerance: FlagGems' `gems_assert_close` compares against the torch reference on CPU with a per-dtype `rtol` (1.3e-6 fp32, 1e-3 fp16, 0.016 bf16, 0 for exact dtypes) plus `atol` 1e-4.
+- **What counts as a pass.** rc 0 *and* at least one passed test. A module whose tests all skipped (backend or dtype unavailable on this box) verified nothing and is `no_test`; rc 5 (nothing collected) is `no_test` too. rc 2/3/4 are `error` (interrupted, internal, usage — e.g. a conftest that wants a flag), anything else `fail`, a timeout `timeout`. `fail`, `timeout` and `error` drop the op; `no_test` does not.
+- **The benchmark inventory is not 1:1 with the tests.** 604 of the 1684 inventoried ops have no matching test: `perf_`-prefixed functions, inplace and out variants share one test, some benchmarks have none. Dropping those would remove a third of the ops for a reason that says nothing about the compiler, so they run with `no_test` recorded, and the report says how many results are not backed by an accuracy check.
+- **Recorded per (op, side), not just printed.** `ab.json` gets an `accuracy` object next to the manifest fields: `sides.<a|b>.<repo>/<op>` with status, target, return code, duration and the path of its log under `<out>/accuracy/<side>/<repo>/<op>/gate.log`, plus `skipped: {op: why}` with pytest's first summary line. A recorded `pass` or `no_test` is reused when the same `--out` is resumed and under `--add-rounds`, so the gate is paid once. `--accuracy-timeout` (default 1800 s) caps a single run, killed by process group like a timed-out benchmark.
+- **In the report.** `ab_compare.py` prints the section after the verdicts — per side counts, the number of `no_test` op-sides, and every skipped op with the reason — and `--csv` carries an `accuracy` column (`a:pass,b:fail`) per row. An op skipped by the gate has no rounds, so it appears only in that section; one measured in an earlier ungated invocation keeps its old rows, with the skip listed alongside.
+- **What it does not do.** It does not make the verdict more reliable: the gate answers "are the numbers still right on both sides", the statistics answer "is the difference real". It also cannot catch a difference both sides share (a wrong tolerance in the test, an op whose reference is itself the gems implementation).
 
 ## Shape override
 

@@ -1,3 +1,4 @@
+import csv
 import json
 
 import ab_compare
@@ -82,3 +83,45 @@ def test_analyze_pairs_rounds_and_applies_the_gate(tmp_path):
     only_late = ab_compare.analyze(out, gate, (4, 6))
     assert only_late[0].row.rounds == [4, 5, 6]
     assert ab_compare.op_labels(out) == {"main/softmax": "main:softmax@softmax"}
+
+
+# ---------------- accuracy gate ----------------
+
+def test_accuracy_of_reads_each_side():
+    manifest = {"accuracy": {"sides": {"a": {"main/softmax": {"status": "pass"}},
+                                       "b": {"main/softmax": {"status": "fail"}}}}}
+    assert ab_compare.accuracy_of(manifest, "main/softmax") == "a:pass,b:fail"
+    assert ab_compare.accuracy_of({}, "main/softmax") == ""
+
+
+def test_report_accuracy_shows_counts_and_skipped_ops(capsys):
+    """The gate decides whether an op has an A/B at all, so the report names the ops it
+    dropped and how many are unverified (no_unit test upstream)."""
+    manifest = {"accuracy": {
+        "tests_dir": "tests",
+        "sides": {"a": {"main/abs": {"status": "pass"}, "main/add": {"status": "pass"}},
+                  "b": {"main/abs": {"status": "no_test"}, "main/add": {"status": "fail"}}},
+        "skipped": {"main/add": "b:fail (FAILED tests/test_add.py::test_add - mismatch)"}}}
+    ab_compare.report_accuracy(manifest, {"main/add": "main:add@add"})
+    out = capsys.readouterr().out
+    assert "accuracy gate (tests/ unit test per side): 2 ops checked" in out
+    assert "A: pass 2" in out and "B: fail 1, no_test 1" in out
+    assert "no_test: 1" in out
+    assert "skipped A/B (a side did not pass): 1" in out
+    assert "main:add@add" in out and "b:fail" in out
+
+
+def test_report_accuracy_is_silent_without_a_gate(capsys):
+    ab_compare.report_accuracy({"record": "rec"}, {})
+    assert capsys.readouterr().out == ""
+
+
+def test_write_csv_carries_the_accuracy_column(tmp_path):
+    out = _ab_dir(tmp_path, 6, 0.2, 0.2 / 1.1)
+    manifest = {"accuracy": {"sides": {"a": {"main/softmax": {"status": "pass"}},
+                                       "b": {"main/softmax": {"status": "no_test"}}}}}
+    path = tmp_path / "rows.csv"
+    ab_compare.write_csv(path, ab_compare.analyze(out, None, min_rounds=5),
+                         ab_compare.op_labels(out), manifest)
+    rows = list(csv.DictReader(path.open(newline="")))
+    assert rows and {r["accuracy"] for r in rows} == {"a:pass,b:no_test"}

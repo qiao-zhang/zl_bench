@@ -9,6 +9,7 @@ zl_bench 如何从 FlagGems benchmark 得到可比的数字，以及解读时要
 - [计时](#计时)
 - [IR 落盘](#ir-落盘)
 - [统计判定](#统计判定)
+- [精度门禁](#精度门禁)
 - [shape 覆盖](#shape-覆盖)
 - [多卡并行 sweep](#多卡并行-sweep)
 - [对上游的依赖](#对上游的依赖)
@@ -135,6 +136,17 @@ A、B 在同一张卡上紧挨着运行，抵消卡间偏差（同一台机器�
 `--until-decided` 给有 undecided 行的算子补轮。每补一次就重新检验，会让误报率略有上升（序贯检验）；对照组得到同样的补轮，能看出上升了多少。
 
 接近阈值或只靠少数几轮判定的行，是用同一批样本既挑出来又判定的，小效应会被高估（赢家诅咒）。办法是独立复测：`ab_run.py --add-rounds N` 跑 N 个新轮次，`ab_compare.py --confirm` 只用这些新轮次判定每个 faster/slower 行，按原方向做单侧检验，α = 0.05。用单侧检验是因为方向在新数据产生之前就已确定；两次检验都通过的行，只有两次都误报才是假阳性，新轮次相互独立，这种情况很少。确认成立的行报告全部轮次上的 gap；没能复现的行改为 undecided 而不是 same，因为真实的小效应也可能在少数几轮里没测出来。
+
+## 精度门禁
+
+`ab_run.py --accuracy-gate` 在第一轮之前先跑各侧自己的单元测试，某一侧过不了的算子直接不进 A/B。A/B 只比延迟：上游 `benchmark/base.py` 对数值没有任何断言（`torch_op` 只是被计时的基线），编译器把算子的算术改坏了，两侧照样出计时行，报告还会把差别当成加速。挡住"数值回归变成性能结论"的就是这层门禁。
+
+- **跑什么。** 该算子所在仓库的 `tests/test_<op_file>.py::test_<op>`（`op_file` 保留 benchmark 子目录，所以 `benchmark/test_FLA/test_x.py` 对应 `tests/test_FLA/test_x.py`），独立进程、`cwd` 为仓库根、用该侧的 `PYTHONPATH` 与 `--a-env`/`--b-env`、只占一张卡。就是开发者手跑的那条测试，因此用的是仓库自己的容差：FlagGems 的 `gems_assert_close` 在 CPU 上与 torch 参考实现比较，`rtol` 按 dtype 取（fp32 1.3e-6、fp16 1e-3、bf16 0.016，精确 dtype 为 0），再加 `atol` 1e-4。
+- **什么算通过。** rc 0 **且**至少有一个测试真的 passed。整个模块都被 skip（这台机器没有对应后端或 dtype）说明什么都没验证，记 `no_test`；rc 5（没收集到测试）同样是 `no_test`。rc 2/3/4 是 `error`（中断、内部错误、用法错误，例如 conftest 要求某个参数），其余是 `fail`，超时是 `timeout`。`fail`、`timeout`、`error` 的算子被摘掉，`no_test` 不会。
+- **benchmark 清单与单测不是 1:1。** 1684 个算子里有 604 个没有对应的 `tests/test_<op_file>.py::test_<op>`：`perf_` 前缀的函数、inplace 与 out 变体共用一个测试，还有些 benchmark 根本没有测试。把这些也摘掉，等于因为一个与编译器无关的原因砍掉三分之一算子，所以它们照常跑 A/B 并记 `no_test`；报告会说明有多少条结果背后没有精度验证。
+- **按 (算子, 侧) 记录，不只是打印。** `ab.json` 在 manifest 字段旁边多一个 `accuracy` 对象：`sides.<a|b>.<repo>/<op>`，含状态、目标、返回码、耗时和它那份 `<out>/accuracy/<side>/<repo>/<op>/gate.log` 的路径，另有 `skipped: {算子: 原因}`，原因取 pytest 的第一条摘要行。已记录的 `pass` 与 `no_test` 在同一个 `--out` 上续跑以及 `--add-rounds` 时直接复用，门禁只付一次成本。`--accuracy-timeout`（默认 1800 秒）限制单次运行，超时按进程组杀掉，与超时的 benchmark 一致。
+- **在报告里。** `ab_compare.py` 在判定之后打印这一节：每侧的状态计数、`no_test` 的数量、以及每个被跳过的算子及其原因；`--csv` 每行多一列 `accuracy`（如 `a:pass,b:fail`）。被门禁跳过的算子没有任何轮次，只出现在这一节；如果它在更早一次没开门禁的运行里测过，旧行仍会显示，跳过记录会并列写在一起。
+- **它不做什么。** 它不会让判定更可靠：门禁回答"两侧的数值还对不对"，统计回答"这个差别是不是真的"。两侧共有的问题它也发现不了（测试本身的容差写错、参考实现就是 gems 自己）。
 
 ## shape 覆盖
 

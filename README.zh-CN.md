@@ -160,6 +160,7 @@ python ab_compare.py runs/ab_dev -v --csv runs/ab_dev/rows.csv
 - 每行的判定（[详情](docs/design.zh-CN.md#统计判定)）：至少 `--min-rounds`（6）轮，中位数之差超过 `--threshold`（0.5%）且双侧 Mann-Whitney 检验 p < `--alpha`（0.01）时为 `faster` / `slower`；差距在阈值内或 p ≥ `--clear`（0.1）时为 `same`；其余为 `undecided`。`--until-decided` 给有 undecided 行的算子每次补 `--step` 轮，直到 `--max-rounds`（14）。
 - `gap = median(A) / median(B) − 1`，B 更快时为正。它是在该记录的 config 下编译器改动的效果，而不是两侧各自最优之间的差（[原因](docs/design.zh-CN.md#两侧各自最优)）。
 - 加 `--gate <ir_gate 输出目录>`（见下一节）后，kernel 在两侧编译成同一二进制的行作为对照组：它们不可能有差别，`ab_compare.py` 会报告其中被判为 faster 或 slower 的数量，即实测误报率。
+- **先过精度门禁（`--accuracy-gate`）。** A/B 只比延迟：编译器如果把算子的算术改错了，两侧照样出计时行，报告还会给出"更快"。加 `--accuracy-gate` 后，每一轮之前先各跑一遍该侧自己的单元测试（`tests/test_<op_file>.py::test_<op>`，独立进程，用该侧的 PYTHONPATH 与 `--a-env`/`--b-env`），过不了的算子直接不做 A/B。上游没有对应测试的算子（1684 个 benchmark 里有 604 个：`perf_` 前缀与 inplace 变体共用一个测试）记为 `no_test`，照常跑 A/B。结果写进 `ab.json`、`<out>/accuracy/<side>/<repo>/<op>/gate.log`，并出现在 `ab_compare.py` 的报告末尾和 `--csv` 的 `accuracy` 列（[详情](docs/design.zh-CN.md#精度门禁)）。
 - **证据弱的结果用全新的轮次复测。** 差距小或噪声大的行，是用同一批样本既挑出来又判定的，会被高估。`ab_compare.py --recheck-list` 写出含这类行（|gap| < 2%、|gap| 小于样本变异系数的 2 倍，或用 do_bench 计时）的算子；`ab_run.py --add-rounds 6` 给它们补新的轮次，编号接在已有轮次之后；`ab_compare.py --confirm <起>-<止>`（`ab_run.py` 会打印这个范围）先用其余轮次判定每一行，faster/slower 的行只有在新轮次单独也能复现（单侧，p < 0.05）时才保留：
 
   ```bash

@@ -22,31 +22,44 @@ per-row verdicts.
   # fresh rounds for an independent check (judge them with ab_compare.py --rounds)
   python ab_run.py ... --out runs/ab_x --ops-file recheck.txt --add-rounds 6
 
+  # same, but run each side's unit test first and skip the ops it fails
+  python ab_run.py ... --accuracy-gate --out runs/ab_x
+
 Output: <out>/r<k>_a and <out>/r<k>_b, each laid out like a run_batch.py batch dir
 (ops_status.csv, summary.csv, <repo>/<run_name>/), and <out>/ab.json with the sides.
 Rerunning with the same --out resumes: finished runs are kept, failed ones rerun.
+
+With --accuracy-gate each side's unit test for the op (tests/test_<op_file>.py::test_<op>
+of that repo) runs before the first round, and an op a side does not pass gets no A/B
+at all: a compiler that changes the numbers is not a performance result. An op whose
+repo has no matching test is not dropped -- it is recorded as no_test, since the
+benchmark inventory and the tests are not 1:1. The outcome, including why an op was
+skipped, goes to ab.json and into ab_compare.py's report.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 import os
 import queue
+import re
 import statistics
+import subprocess
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import ab_compare
 import batch_summary
 import run_batch
-from gen_inventory import ZL_BENCH
+from gen_inventory import REPOS, ZL_BENCH
 
 LOG = "[ab]"
 SIDES = ("a", "b")
@@ -104,6 +117,15 @@ def parse_args() -> argparse.Namespace:
     e.add_argument("--use-flagtune", type=int, default=0, choices=(0, 1))
     e.add_argument("--busy-gpu", choices=("wait", "warn", "ignore"), default="wait",
                    help="when another process uses a GPU: wait (default), warn, or ignore")
+
+    g = p.add_argument_group("accuracy gate")
+    g.add_argument("--accuracy-gate", action="store_true",
+                   help="before the A/B, run each side's unit test for every op "
+                        "(tests/test_<op_file>.py::test_<op> of that repo) and skip the ops "
+                        "a side does not pass; the outcome goes to ab.json and into "
+                        "ab_compare.py's report")
+    g.add_argument("--accuracy-timeout", type=int, default=1800,
+                   help="timeout of one unit-test run in seconds, 0 = none (default %(default)s)")
     args = p.parse_args()
 
     if args.add_rounds and args.until_decided:
@@ -143,9 +165,13 @@ def side_stacks(sides: Dict[str, dict]) -> Dict[str, str]:
 # ---------------- manifest ----------------
 
 def manifest(args: argparse.Namespace) -> dict:
-    return {"record": str(args.record), "sides": args.sides, "dtypes": args.dtypes,
-            "metrics": args.metrics,
-            "shape_file": str(args.shape_file or ""), "use_flagtune": args.use_flagtune}
+    out = {"record": str(args.record), "sides": args.sides, "dtypes": args.dtypes,
+           "metrics": args.metrics,
+           "shape_file": str(args.shape_file or ""), "use_flagtune": args.use_flagtune}
+    # Only when on: an existing dir recorded without it stays resumable.
+    if getattr(args, "accuracy_gate", False):
+        out["accuracy_gate"] = True
+    return out
 
 
 def check_manifest(args: argparse.Namespace) -> None:
@@ -161,6 +187,226 @@ def check_manifest(args: argparse.Namespace) -> None:
         return
     args.out.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(want, indent=1) + "\n")
+
+
+# ---------------- accuracy gate ----------------
+
+GATE_DIR = "accuracy"      # <out>/accuracy/<side>/<repo>/<run_name>/gate.log
+GATE_TESTS = "tests"       # upstream unit tests, next to benchmark/
+GATE_PASS = "pass"
+GATE_FAIL = "fail"
+GATE_TIMEOUT = "timeout"
+GATE_NO_TEST = "no_test"   # the repo has no unit test for this op: unverified, not a failure
+GATE_ERROR = "error"       # pytest could not run at all (usage/internal error)
+GATE_SKIP = (GATE_FAIL, GATE_TIMEOUT, GATE_ERROR)
+PYTEST_NO_TESTS_RC = 5
+# pytest's summary counts: "5 passed, 2 skipped in 3.2s"
+_COUNT_RE = re.compile(r"(\d+) (passed|failed|skipped|error|errors|xfailed|xpassed)")
+
+
+def _defines(path: Path, name: str) -> bool:
+    """True when the module defines a function `name`."""
+    try:
+        tree = ast.parse(path.read_text(errors="replace"))
+    except (OSError, SyntaxError):
+        return False
+    return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
+               for n in ast.walk(tree))
+
+
+def test_target(case: run_batch.Case) -> Optional[str]:
+    """`tests/test_<op_file>.py::test_<op>` of the case's repo, or None when that
+    repo has no unit test for the op.
+
+    The inventory of benchmarks and the tests are not 1:1: `perf_`-prefixed
+    functions, inplace and out variants share one test, and some benchmarks have
+    no test at all. A missing match is therefore a normal outcome (no_test, the
+    op still gets an A/B) and not an error."""
+    tests_dir = (REPOS[case.repo] / GATE_TESTS).resolve()
+    path = (tests_dir / f"test_{case.op_file}.py").resolve()
+    name = f"test_{case.op}"
+    if tests_dir not in path.parents or not path.is_file() or not _defines(path, name):
+        return None
+    return f"{GATE_TESTS}/test_{case.op_file}.py::{name}"
+
+
+def accuracy_env(args: argparse.Namespace, side: str, gpu: str) -> Dict[str, str]:
+    """The side's environment for its unit test: its PYTHONPATH and variables, but
+    none of the benchmark harness's (no replay, no shape set, no dtype filter)."""
+    env = run_batch.op_env(args.sides[side]["env"])
+    for key in ("OP", "OP_FILE", "OUT_DIR", "REPLAY_FROM", "SHAPE_FILE", "DTYPES", "METRICS",
+                "PARALLEL_WARMUP_GPUS", "FLAGGEMS_PERF_IR_DUMP_DIR"):
+        env.pop(key, None)
+    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    pythonpath = args.sides[side]["pythonpath"]
+    if pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [pythonpath, env.get("PYTHONPATH")]))
+    env.update({"CUDA_VISIBLE_DEVICES": gpu, "NO_COLOR": "1", "FLAGGEMS_PERF_COLOR": "never"})
+    if run_batch.accelerator(env) == "metax":
+        env["MACA_VISIBLE_DEVICES"] = gpu
+    return env
+
+
+def gate_status(rc: int, timed_out: bool, text: str = "") -> str:
+    """pytest's exit code -> gate status.
+
+    5 means nothing was collected, and rc 0 with every test skipped means the tests
+    need something this box lacks: both verify nothing, so they are no_test rather
+    than a pass."""
+    if timed_out:
+        return GATE_TIMEOUT
+    if rc == 0:
+        return GATE_PASS if pytest_counts(text).get("passed") else GATE_NO_TEST
+    if rc == PYTEST_NO_TESTS_RC:
+        return GATE_NO_TEST
+    if rc in (2, 3, 4):  # interrupted / internal error / usage error
+        return GATE_ERROR
+    return GATE_FAIL
+
+
+def pytest_counts(text: str) -> Dict[str, int]:
+    """pytest's summary counts ("5 passed, 2 skipped in 3.2s"), from the last line
+    that carries them."""
+    for line in reversed(text.splitlines()):
+        found = _COUNT_RE.findall(line)
+        if found:
+            return {word.rstrip("s"): int(n) for n, word in found}
+    return {}
+
+
+def gate_detail(text: str, status: str) -> str:
+    """One line saying why a gate run did not pass: pytest's own summary lines."""
+    if status == GATE_PASS:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines()
+             if ln.strip().startswith(("FAILED ", "ERROR ", "SKIPPED "))]
+    if not lines:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()][-1:]
+    return "; ".join(lines[:3])[:300]
+
+
+def run_accuracy(case: run_batch.Case, side: str, args: argparse.Namespace,
+                 gpu: str) -> Dict[str, str]:
+    """One (op, side): its unit test in a fresh process, like one A/B run."""
+    target = test_target(case)
+    if target is None:
+        return {"status": GATE_NO_TEST, "target": "", "return_code": "", "elapsed_ms": "0",
+                "log": "", "detail": f"no {GATE_TESTS}/test_{case.op_file}.py::test_{case.op}"}
+    out_dir = args.out / GATE_DIR / side / case.repo / case.run_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log = out_dir / "gate.log"
+    t0 = time.time()
+    # -ra: skip and failure summary lines, because a test that skipped half its dtypes
+    # (or all of them) still exits 0.
+    cmd = ["python", "-m", "pytest", "-q", "-ra", "-p", "no:cacheprovider", target]
+    with log.open("w") as f:
+        proc = subprocess.Popen(cmd, cwd=str(REPOS[case.repo]), env=accuracy_env(args, side, gpu),
+                                stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+        rc, timed_out = run_batch._wait(proc, args.accuracy_timeout)
+    text = log.read_text(errors="replace")
+    status = gate_status(rc, timed_out, text)
+    return {"status": status, "target": target, "return_code": str(rc),
+            "elapsed_ms": str(int((time.time() - t0) * 1000)),
+            "log": log.relative_to(args.out).as_posix(), "detail": gate_detail(text, status)}
+
+
+def load_gate(out: Path) -> Dict[str, Dict[str, Dict[str, str]]]:
+    """{side: {<repo>/<run_name>: row}} recorded in an earlier invocation."""
+    path = out / ab_compare.MANIFEST
+    try:
+        data = json.loads(path.read_text()) if path.is_file() else {}
+    except ValueError:
+        return {}
+    sides = (data.get("accuracy") or {}).get("sides") or {}
+    return {side: dict(rows) for side, rows in sides.items() if isinstance(rows, dict)}
+
+
+def save_gate(out: Path, gate: Dict[str, Dict[str, Dict[str, str]]],
+              skipped: Dict[str, str]) -> None:
+    """Merge the gate results into ab.json, next to the manifest fields."""
+    path = out / ab_compare.MANIFEST
+    data = json.loads(path.read_text()) if path.is_file() else {}
+    data["accuracy"] = {"tests_dir": GATE_TESTS,
+                        "skipped": {run: why for run, why in sorted(skipped.items())},
+                        "sides": {side: gate[side] for side in SIDES if gate.get(side)}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1) + "\n")
+    os.replace(tmp, path)
+
+
+def accuracy_gate(cases: List[run_batch.Case], args: argparse.Namespace,
+                  gpus: List[str]) -> Tuple[List[run_batch.Case], Dict[str, str]]:
+    """Run each side's unit test for every selected op (--accuracy-gate) and drop the
+    ops a side fails. Returns the cases to measure and {run: why it was dropped}.
+
+    Recorded pass/no_test rows are reused, so resuming and --add-rounds do not rerun
+    the gate. Ops without a matching test keep their A/B: the gate cannot verify them,
+    which ab.json records as no_test rather than as a pass."""
+    gate: Dict[str, Dict[str, Dict[str, str]]] = {
+        side: dict(load_gate(args.out).get(side) or {}) for side in SIDES}
+    work: List[Tuple[run_batch.Case, str]] = []
+    reused = 0
+    for case in cases:
+        run = f"{case.repo}/{case.run_name}"
+        for side in SIDES:
+            if (gate[side].get(run) or {}).get("status") in (GATE_PASS, GATE_NO_TEST):
+                reused += 1
+            else:
+                work.append((case, side))
+    print(f"{LOG} accuracy gate: {len(cases)} ops x {len(SIDES)} sides, {len(work)} to run"
+          + (f", {reused} already recorded" if reused else ""), flush=True)
+
+    if work:
+        todo: "queue.Queue" = queue.Queue()
+        for it in work:
+            todo.put(it)
+        done = [0]
+        lock = threading.Lock()
+
+        def worker(gpu: str) -> None:
+            while True:
+                try:
+                    case, side = todo.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    row = run_accuracy(case, side, args, gpu)
+                except Exception as exc:  # a harness error must not take the worker down
+                    row = {"status": GATE_ERROR, "target": "", "return_code": "EXC",
+                           "elapsed_ms": "0", "log": "", "detail": f"harness_exc={exc}"}
+                with lock:
+                    gate[side][f"{case.repo}/{case.run_name}"] = row
+                    done[0] += 1
+                    print(f"  ({done[0]:>4}/{len(work)}) {side} {case.repo}:{case.run_name}  "
+                          f"{row['status']}"
+                          + (f"  ({row['detail'][:100]})" if row["detail"] else ""), flush=True)
+
+        threads = [threading.Thread(target=worker, args=(g,)) for g in gpus[:len(work)]]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    skipped: Dict[str, str] = {}
+    for case in cases:
+        run = f"{case.repo}/{case.run_name}"
+        bad = [(side, gate[side].get(run) or {}) for side in SIDES]
+        bad = [(side, row) for side, row in bad if row.get("status") in GATE_SKIP]
+        if bad:
+            skipped[run] = "; ".join(f"{side}:{row['status']}"
+                                     + (f" ({row['detail']})" if row.get("detail") else "")
+                                     for side, row in bad)
+    for side in SIDES:
+        counts = Counter((gate[side].get(f"{c.repo}/{c.run_name}") or {}).get("status", "?")
+                         for c in cases)
+        print(f"{LOG} accuracy gate {side.upper()}: "
+              + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())), flush=True)
+    save_gate(args.out, gate, skipped)
+    if skipped:
+        print(f"{LOG} {len(skipped)} ops skipped by the accuracy gate (recorded in ab.json)",
+              flush=True)
+    return [c for c in cases if f"{c.repo}/{c.run_name}" not in skipped], skipped
 
 
 # ---------------- rounds and cost ----------------
@@ -340,6 +586,14 @@ def main() -> None:
         cfg = args.sides[side]
         print(f"{LOG} {side.upper()} = {cfg['name']}: PYTHONPATH={cfg['pythonpath'] or '(inherited)'} "
               + " ".join(f"{k}={v}" for k, v in cfg["env"].items()), flush=True)
+
+    if getattr(args, "accuracy_gate", False):
+        cases, skipped = accuracy_gate(cases, args, gpus)
+        for run, why in sorted(skipped.items()):
+            print(f"{LOG} accuracy gate: no A/B for {run} -- {why}", flush=True)
+        if not cases:
+            raise SystemExit(f"{LOG} every selected op failed the accuracy gate")
+        print(f"{LOG} {len(cases)} ops left to measure", flush=True)
 
     runner = Runner(args)
     done = done_rounds(args.out)

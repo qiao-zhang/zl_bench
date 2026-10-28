@@ -17,6 +17,11 @@ same/undecided among them is a false positive, and their rate is the measured
 false-positive rate of the rule. Only rows with a changed (or unknown) kernel count
 as results. --rounds restricts the analysis to a range of rounds.
 
+With ab_run.py --accuracy-gate, ab.json also records each side's unit-test outcome per
+op (tests/test_<op_file>.py::test_<op>, or no_test when the repo has no such test). The
+report ends with that section and --csv carries an `accuracy` column; ops a side did
+not pass have no A/B rounds, so they appear only there.
+
 Independent recheck of weak results, on fresh rounds:
 
   python ab_compare.py runs/ab_x --gate G --recheck-list recheck.txt   # ops with weak rows
@@ -53,7 +58,7 @@ import math
 import re
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -332,6 +337,57 @@ def _pct(x: float) -> str:
     return f"{x * 100:+.1f}%"
 
 
+# ---------------- accuracy gate ----------------
+
+def accuracy_sides(manifest: dict) -> Dict[str, Dict[str, Dict[str, str]]]:
+    """{side: {<repo>/<run_name>: row}} that ab_run.py --accuracy-gate recorded."""
+    sides = (manifest.get("accuracy") or {}).get("sides") or {}
+    return {side: dict(rows) for side, rows in sides.items() if isinstance(rows, dict)}
+
+
+def accuracy_of(manifest: dict, run: str) -> str:
+    """`a:pass,b:pass` for one op, empty when the A/B ran without a gate."""
+    sides = accuracy_sides(manifest)
+    if not sides:
+        return ""
+    out = []
+    for side in ("a", "b"):
+        row = (sides.get(side) or {}).get(run)
+        if row is not None:
+            out.append(f"{side}:{row.get('status', '?')}")
+    return ",".join(out)
+
+
+def report_accuracy(manifest: dict, labels: Dict[str, str]) -> None:
+    """The accuracy gate's outcome: it is what decides whether an op has an A/B at
+    all, so a report without it would hide why ops are missing."""
+    acc = manifest.get("accuracy") or {}
+    sides = accuracy_sides(manifest)
+    skipped = acc.get("skipped") or {}
+    if not sides and not skipped:
+        return
+    runs = sorted({run for rows in sides.values() for run in rows})
+    tests_dir = acc.get("tests_dir", "tests")
+    print(f"\n== accuracy gate ({tests_dir}/ unit test per side): {len(runs)} ops checked")
+    for side in ("a", "b"):
+        rows = sides.get(side) or {}
+        if not rows:
+            continue
+        counts = Counter((row or {}).get("status", "?") for row in rows.values())
+        print(f"   {side.upper()}: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    unverified = sum(1 for rows in sides.values() for row in rows.values()
+                     if (row or {}).get("status") == "no_test")
+    if unverified:
+        print(f"   no_test: {unverified} op-sides have no unit test upstream, "
+              "their A/B result is not backed by an accuracy check")
+    if skipped:
+        print(f"   skipped A/B (a side did not pass): {len(skipped)}")
+        for run, why in sorted(skipped.items())[:20]:
+            print(f"     {labels.get(run, run):56s} {str(why)[:150]}")
+        if len(skipped) > 20:
+            print(f"     ... {len(skipped) - 20} more (ab.json: accuracy.skipped)")
+
+
 def report(results: List[Result], labels: Dict[str, str], manifest: dict,
            verbose: bool, quiet: bool) -> None:
     sides = manifest.get("sides", {})
@@ -399,11 +455,13 @@ def report(results: List[Result], labels: Dict[str, str], manifest: dict,
         for r in fp[:10]:
             print(f"    false positive: {labels.get(r.row.run, r.row.run)} {r.row.op_name} "
                   f"{r.row.dtype} #{r.row.row} {_pct(r.stats.gap)} p={r.stats.p:.2g}")
+    report_accuracy(manifest, labels)
 
 
-def write_csv(path: Path, results: List[Result], labels: Dict[str, str]) -> None:
-    fields = ["op", "run", "op_name", "dtype", "row", "size_detail", "gate", "rounds",
-              "median_a_ms", "median_b_ms", "gap", "p", "verdict", "flags", "confirm",
+def write_csv(path: Path, results: List[Result], labels: Dict[str, str],
+              manifest: dict) -> None:
+    fields = ["op", "run", "op_name", "dtype", "row", "size_detail", "gate", "accuracy",
+              "rounds", "median_a_ms", "median_b_ms", "gap", "p", "verdict", "flags", "confirm",
               "confirm_rounds", "confirm_gap", "confirm_p"]
     with path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -412,7 +470,8 @@ def write_csv(path: Path, results: List[Result], labels: Dict[str, str]) -> None
             flags = ";".join(x for x, on in (("do_bench", r.row.nocg),
                                              ("replay_fallback", r.row.fallback)) if on)
             w.writerow([labels.get(r.row.run, r.row.run), r.row.run, r.row.op_name, r.row.dtype,
-                        r.row.row, r.row.size, r.gate, r.stats.n_a, f"{r.stats.median_a:.6g}",
+                        r.row.row, r.row.size, r.gate, accuracy_of(manifest, r.row.run),
+                        r.stats.n_a, f"{r.stats.median_a:.6g}",
                         f"{r.stats.median_b:.6g}", f"{r.stats.gap:.6f}",
                         "" if math.isnan(r.stats.p) else f"{r.stats.p:.4g}", r.stats.verdict, flags,
                         r.confirm, r.new.n_a if r.new else "",
@@ -482,9 +541,10 @@ def main() -> None:
     if not results:
         sys.exit("no row has a sample on both sides")
     labels = op_labels(args.a)
-    report(results, labels, json.loads(manifest_path.read_text()), args.verbose, args.quiet)
+    manifest = json.loads(manifest_path.read_text())
+    report(results, labels, manifest, args.verbose, args.quiet)
     if args.csv:
-        write_csv(args.csv, results, labels)
+        write_csv(args.csv, results, labels, manifest)
         print(f"== per-row statistics: {args.csv}")
     if args.recheck_list:
         weak = [r for r in results
