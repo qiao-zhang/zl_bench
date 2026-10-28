@@ -232,6 +232,36 @@ def test_gpu_users_reports_the_mx_smi_process_rows(monkeypatch):
     assert run_batch.gpu_users("0") == ["pid 1787940 python -m pytest (1024 MiB)"]
 
 
+def test_smi_name_strips_the_directory():
+    """ZL_BENCH_SMI may name a path; the dialect follows the tool's name."""
+    assert run_batch.smi_name("mx-smi") == "mx-smi"
+    assert run_batch.smi_name("/opt/maca/bin/mx-smi") == "mx-smi"
+    assert run_batch.smi_name(None) == ""
+
+
+def test_gpu_users_reads_a_path_valued_smi_tool(monkeypatch):
+    """`ZL_BENCH_SMI=/opt/maca/bin/mx-smi` must still take the mx-smi query path:
+    the --query-* spellings mx-smi rejects would make gpu_users return None and
+    skip the idle check, so a busy card would be measured anyway."""
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "/opt/maca/bin/mx-smi")
+    out = {"--show-memory": MX_MEMORY, "--show-all-process": MX_PROCS_BUSY}
+    seen = []
+
+    def fake(args, env=None):
+        seen.append(args[0])
+        return out.get(args[0])
+
+    monkeypatch.setattr(run_batch, "_smi", fake)
+    assert run_batch.gpu_users("0") == ["pid 1787940 python -m pytest (1024 MiB)"]
+    assert not any(arg.startswith("--query") for arg in seen)
+
+
+def test_no_smi_reason_names_the_mx_smi_spellings_for_a_path(monkeypatch):
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "/opt/maca/bin/mx-smi")
+    reason = run_batch._no_smi_reason({})
+    assert "--show-memory" in reason and "--show-all-process" in reason
+
+
 def test_mx_gpu_index_maps_a_uuid(monkeypatch):
     monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: MX_LISTING if args == ["-L"] else None)
     assert run_batch._mx_gpu_index("1") == "1"

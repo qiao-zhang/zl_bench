@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 import rlc_ops
@@ -111,7 +113,52 @@ def test_summarizing_marks_an_unchanged_kernel_with_its_convert_count(tmp_path):
     assert rlc_report.fmt_cvt(stats["cvt"]) == "2 (kernel unchanged)"
 
 
-def test_load_run_kernels_reads_the_a_side_rows_tsv(tmp_path):
+def test_summarizing_reads_a_single_op_gate_under_its_empty_run(tmp_path):
+    """ir_gate.py records a single-op run dir with run "" (see RunDir.run), and
+    ab_compare.gate_flag falls back to that key. The report must too: otherwise a
+    changed kernel reads as "kernel unchanged" and the convert count is lost."""
+    (tmp_path / "base" / "H1").mkdir(parents=True)
+    (tmp_path / "new" / "H1").mkdir(parents=True)
+    (tmp_path / "base" / "H1" / "k.digest.json").write_text('{"ops": {"ttg.convert_layout": 5}}')
+    (tmp_path / "new" / "H1" / "k.digest.json").write_text('{"ops": {"ttg.convert_layout": 2}}')
+    gate = {("", "kron", "torch.bfloat16", 0): ["H1"]}
+    kernels = {("main/kron", "kron", "torch.bfloat16", 0): ["H1"]}
+    stats = rlc_report.summarizing([_row()], gate, tmp_path, {}, "main:kron@kron", "bf16",
+                                   None, kernels)
+    assert rlc_report.fmt_cvt(stats["cvt"]) == "5→2"
+
+
+def test_row_entry_falls_back_to_the_empty_run():
+    table = {("", "kron", "torch.bfloat16", 0): ["H1"]}
+    assert rlc_report.row_entry(table, "main/kron", "kron", "torch.bfloat16", 0) == ["H1"]
+    assert rlc_report.row_entry(table, "main/kron", "kron", "torch.bfloat16", 9) == []
+    assert rlc_report.row_entry(None, "main/kron", "kron", "torch.bfloat16", 0) == []
+
+
+def test_main_reads_a_single_op_gate(monkeypatch, tmp_path):
+    """The whole report path, with the gate of a single-op run dir: the changed
+    kernel and its convert count must survive the empty run key."""
+    gate_dir = tmp_path / "gate"
+    for side, count in (("base", 5), ("new", 2)):
+        (gate_dir / side / "H1").mkdir(parents=True)
+        (gate_dir / side / "H1" / "k.digest.json").write_text(
+            '{"ops": {"ttg.convert_layout": %d}}' % count)
+    (gate_dir / "rows.tsv").write_text(
+        "run\top\top_name\tdtype\trow\tshape\tchanged\tchanged_kernels\n"
+        "\tmain:kron@kron\tkron\ttorch.bfloat16\t0\t4x4\t1\tH1\n", encoding="utf-8")
+    csv_path = tmp_path / "rows.csv"
+    csv_path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        "main:kron@kron,main/kron,kron,torch.bfloat16,0,0.2,1.0,0.8,changed,,faster\n",
+        encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(rlc_report, "write_xlsx",
+                        lambda path, rows, title, env: seen.update(rows=rows))
+    monkeypatch.setattr(sys, "argv", ["rlc_report.py", "--csv", str(csv_path),
+                                      "--gate", str(gate_dir),
+                                      "--out", str(tmp_path / "out.xlsx")])
+    rlc_report.main()
+    assert rlc_report.fmt_cvt(seen["rows"][0]["groups"]["bf16"]["cvt"]) == "5→2"
     path = tmp_path / "r1_a" / "main" / "kron" / "rows.tsv"
     path.parent.mkdir(parents=True)
     path.write_text("op_name\tdtype\trow\tshape\tkernels\n"
@@ -133,6 +180,91 @@ def test_dtype_groups_and_formatters():
     assert rlc_report.fmt_time(0.0005) == "0.5 µs"
     assert rlc_report.fmt_time(0.05) == "50 µs"
     assert rlc_report.fmt_time(12.09) == "12.09 ms"
+
+
+def test_op_entry_counts_the_dtypes_the_table_has_no_column_for():
+    """A dtype without a column (float32, ...) is not a dtype to drop: its rows still
+    name a gain or a regression of the op, and the note says they are not shown."""
+    rows = [_row(gap=0.05), _row(gap=-0.5, row=1, dtype="torch.float32", a=2.0, b=3.0)]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert entry["rows"] == 2
+    assert list(entry["groups"]) == ["bf16"]
+    assert entry["cost"] == pytest.approx(1.0)   # the float32 row's regression
+    assert "float32 1 行" in entry["note"]
+
+
+def test_op_entry_keeps_the_warnings_of_an_ungrouped_dtype():
+    """A row the table has no column for still carries do_bench timing, a replay/
+    config mismatch and the manual note — dropping them would make a result that no
+    longer uses the same config look fine."""
+    rows = [_row(dtype="torch.float32", flags="do_bench;replay_fallback", gate="unchanged",
+                 verdict="slower")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None,
+                                {"main:kron@kron": "手工：选到不同 autotune"},
+                                {"main/kron": "host 同步"}, {})
+    assert "do_bench 计时（host 同步）" in entry["note"]
+    assert "replay 回退，config 不一致" in entry["note"]
+    assert "手工：选到不同 autotune" in entry["note"]
+    assert "float32 1 行" in entry["note"]
+
+
+def test_op_entry_gathers_warnings_from_every_dtype():
+    """The op's note is not the union of its dtype groups' notes: a warning only the
+    float32 row carries still has to appear next to the bf16 columns."""
+    rows = [_row(gap=0.05), _row(dtype="torch.float32", row=1, gap=-0.1,
+                                 flags="replay_fallback", verdict="slower")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert "replay 回退，config 不一致" in entry["note"]
+    assert entry["groups"]["bf16"]["note"] == ""
+
+
+def test_op_entry_labels_a_group_only_warning_with_its_dtype():
+    """The table has one note per op, so a warning that only one dtype's rows produce
+    has to carry that dtype: bf16 keeping its kernels is a bf16-level statement and
+    stops being true for the op once the fp16 rows changed."""
+    rows = [_row(gate="unchanged", verdict="slower", gap=-0.1, row=0),
+            _row(dtype="torch.float16", gate="changed", verdict="faster", gap=0.2, row=1)]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert entry["note"] == "bf16 指令未增删"
+    assert entry["groups"]["bf16"]["note"] == "指令未增删"   # the group keeps it unlabelled
+
+
+def test_op_entry_keeps_the_plain_unchanged_warning_when_every_dtype_agrees():
+    rows = [_row(gate="unchanged", verdict="slower", gap=-0.1)]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert entry["note"] == "指令未增删"
+
+
+def test_ungrouped_note_is_empty_when_every_row_has_a_column():
+    assert rlc_report.ungrouped_note([_row(dtype="torch.bfloat16"),
+                                      _row(dtype="torch.float8_e4m3fn")]) == ""
+
+
+def test_main_reports_an_op_that_only_ran_float32(monkeypatch, tmp_path):
+    """The CSV is the source of the op list: an op whose rows are all float32 still
+    gets its table row (and its saving/cost), instead of the report coming back
+    empty while the input had rows."""
+    csv_path = tmp_path / "rows.csv"
+    csv_path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        "main:kron@kron,main/kron,kron,torch.float32,0,-0.2,1.0,1.2,changed,,slower\n",
+        encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(rlc_report, "write_xlsx",
+                        lambda path, rows, title, env: seen.update(rows=rows))
+    monkeypatch.setattr(sys, "argv", ["rlc_report.py", "--csv", str(csv_path),
+                                      "--out", str(tmp_path / "out.xlsx")])
+    rlc_report.main()
+    assert len(seen["rows"]) == 1
+    entry = seen["rows"][0]
+    assert entry["label"] == "main:kron@kron" and entry["rows"] == 1
+    assert entry["groups"] == {} and entry["cost"] == pytest.approx(0.2)
+    assert "float32 1 行" in entry["note"]
 
 
 def test_notes_are_automatic_and_manual(monkeypatch, tmp_path):

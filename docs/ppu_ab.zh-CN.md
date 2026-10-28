@@ -1,6 +1,6 @@
 # RLC Enhance A/B 测试指南（PPU）
 
-本文说明如何用 `ops/rlc_ppu_key.txt` 里的算子，在同一份 FlagTree 构建上比较
+本文说明如何用 `ops/key_ops.txt` 里的算子，在同一份 FlagTree 构建上比较
 `FLAGTREE_RLC_ENHANCE=0`（A 侧，基线）与 `FLAGTREE_RLC_ENHANCE=1`（B 侧，开启 RLC）
 的 kernel 延迟差异。所有命令都在 `zl_bench/` 目录下执行。
 
@@ -44,9 +44,9 @@
 | 算子仓库 | `../FlagGems` 与 `../FlagGems-vllm`（可用 `FLAGGEMS_MAIN_DIR` / `FLAGGEMS_VLLM_DIR` 覆盖） |
 | 加速卡   | PPU；`ppu-smi` 可用（或设 `ZL_BENCH_SMI`），且每张卡在算子启动前必须空闲                       |
 | Python   | 依赖见 `requirements.txt`；仅生成 xlsx 报告时需要 `openpyxl`                                   |
-| 算子清单 | `ops/rlc_ppu_key.txt`（56 个 `# key` 分组，122 条 `repo:op@op_file`）                        |
+| 算子清单 | `ops/key_ops.txt`（56 个 `# key` 分组，122 条 `repo:op@op_file`）                        |
 
-`ops/rlc_ppu_key.txt` 的约定：
+`ops/key_ops.txt` 的约定：
 
 - `#` 开头的行（分组标题与备注）会被加载器跳过；
 - 每个非注释行必须是 `[repo:]op[@op_file]`，**行尾不要加注释**，否则 `op_file` 会带上注释文本；
@@ -75,7 +75,7 @@ FLAGTREE_RLC_ENHANCE=0 python -c "from triton import knobs; print('A side rlc_en
 FLAGTREE_RLC_ENHANCE=1 python -c "from triton import knobs; print('B side rlc_enhance =', knobs.ppu.rlc_enhance)"
 
 ppu-smi -L                 # 确认卡号（不同版本也支持 --list-gpus / --list-ppus）
-wc -l ops/rlc_ppu_key.txt  # 259 行
+wc -l ops/key_ops.txt  # 259 行
 ```
 
 上面的两条 `python -c` 应分别打印 `False` 与 `True`。若第二个仍是 `False`，说明`PYTHONPATH` 指向了另一套 triton，或环境里已有同名变量覆盖。
@@ -116,7 +116,7 @@ export ZL_BENCH_SMI=ppu-smi
 
 ```shell
 python run_batch.py \
-  --ops-file ops/rlc_ppu_key.txt \
+  --ops-file ops/key_ops.txt \
   --shape-file shape/all_ops_multi.yaml \
   --env FLAGTREE_RLC_ENHANCE=0 \
   --gpus "$GPUS" \
@@ -129,7 +129,7 @@ python run_batch.py \
 
 | 参数                                              | 说明                                                                      |
 | ------------------------------------------------- | ------------------------------------------------------------------------- |
-| `--ops-file ops/rlc_ppu_key.txt`                | 选中的 122 条 op；默认 repo 前缀已在文件里写明                            |
+| `--ops-file ops/key_ops.txt`                | 选中的 122 条 op；默认 repo 前缀已在文件里写明                            |
 | `--shape-file shape/all_ops_multi.yaml`         | kernel 变体取决于 shape，不传时默认 `shape/all_ops_single.yaml`，单 shape 记录看不到只用其他 shape 的变体；但多 shape 会显著拉长 record 与 A/B 时间                           |
 | `--env FLAGTREE_RLC_ENHANCE=0`                  | 传给每个算子子进程（`run_pytest.sh`）                                   |
 | `--gpus "$GPUS"`                                        | 卡号，按 `ppu-smi` 的输出；不传则取 `CUDA_VISIBLE_DEVICES` 或自动枚举 |
@@ -165,7 +165,7 @@ python ir_gate.py runs/rlc_ppu_key_base \
 
 ```shell
 python ab_run.py --record runs/rlc_ppu_key_base \
-  --ops-file ops/rlc_ppu_key.txt \
+  --ops-file ops/key_ops.txt \
   --a-env FLAGTREE_RLC_ENHANCE=0 \
   --b-env FLAGTREE_RLC_ENHANCE=1 \
   --a-name RLC-enhance-off \
@@ -263,7 +263,7 @@ python rlc_report.py \
   --out rlc_ppu_key_report.xlsx
 ```
 
-注意 `--sources` 默认指向 `ops/rlc_ops_sources.csv`（由 `rlc_ops.py` 从对比表生成），本次清单是手工维护的 `ops/rlc_ppu_key.txt`，两者不配套；若不需要表行来源信息，保持默认即可，若混入了旧表的行，用 `--sources` 指向本次的来源文件或先补一份。
+注意 `--sources` 默认指向 `ops/rlc_ops_sources.csv`（由 `rlc_ops.py` 从对比表生成），本次清单是手工维护的 `ops/key_ops.txt`，两者不配套；若不需要表行来源信息，保持默认即可，若混入了旧表的行，用 `--sources` 指向本次的来源文件或先补一份。
 
 ---
 
@@ -337,7 +337,7 @@ runs/rlc_ppu_key_ab/                    # A/B
    不存在 A 侧产物被 B 侧复用的风险；不要手动把两侧指向同一个缓存目录。
 7. **显式选中的 skip 项也会跑**：`vllm:sparse_attn_triton`（`marked_skip=yes`）与
    `vllm:fp8_fp4_*`（`collected=no`）在 `--ops-file` 里是显式条目，加载器不会过滤。
-8. **注释位置**：`ops/rlc_ppu_key.txt` 的备注是独立 `#` 行；若在 op 行尾加注释，
+8. **注释位置**：`ops/key_ops.txt` 的备注是独立 `#` 行；若在 op 行尾加注释，
    `op_file` 会带上注释文本而解析失败。
 9. **断点续跑**：用同一 `--out` 重跑 `ab_run.py`，已完成轮次保留，失败的重跑；
    `ab.json` 不一致会拒绝续跑。
@@ -349,7 +349,7 @@ runs/rlc_ppu_key_ab/                    # A/B
 
 ## 7. 规模与时间估算
 
-`ops/rlc_ppu_key.txt` 展开为 122 条 op（main 66、vllm 56）。
+`ops/key_ops.txt` 展开为 122 条 op（main 66、vllm 56）。
 
 - 6 轮 A/B = 122 × 6 × 2 ≈ **1464 次单算子运行**。
 - 单 shape、每算子 10–30 秒（主要是进程启动与 import）时：单卡约 4–12 小时；

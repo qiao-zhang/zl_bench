@@ -309,6 +309,14 @@ def accelerator(env: Optional[Dict[str, str]] = None) -> Optional[str]:
     return None
 
 
+def smi_name(tool: Optional[str]) -> str:
+    """The tool's own name, without the directory it was given with.
+
+    ZL_BENCH_SMI may name a path (/opt/maca/bin/mx-smi) as well as a bare command:
+    the dialect a tool speaks follows its name, not how it was invoked."""
+    return os.path.basename(tool or "")
+
+
 def smi_tool(env: Optional[Dict[str, str]] = None) -> Optional[str]:
     """The accelerator management tool in use, or None when none is usable.
 
@@ -501,7 +509,7 @@ def gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[List[s
     """What is using gpu (a management-tool index or a GPU uuid): its processes, or
     the memory in use when no process is listed; empty when idle, None if the tool
     cannot tell."""
-    if smi_tool(op_env(env)) == "mx-smi":
+    if smi_name(smi_tool(op_env(env))) == "mx-smi":
         # mx-smi speaks none of the --query-* spellings below.
         return _mx_smi_gpu_users(gpu, env)
     gpus = _smi_first(SMI_GPU_ARGS, csv_query=True, env=env)
@@ -523,7 +531,7 @@ def _no_smi_reason(env: Optional[Dict[str, str]] = None) -> str:
     """Why the device query is impossible, for the one warning the batch prints."""
     tool = smi_tool(env)
     if tool is not None:
-        tried = ("-L/--show-memory/--show-all-process" if tool == "mx-smi"
+        tried = ("-L/--show-memory/--show-all-process" if smi_name(tool) == "mx-smi"
                  else "-L/--query-ppu/--query-gpu and their compute-apps forms")
         return f"{tool} cannot list GPU processes (tried {tried})"
     vendor = accelerator(env)

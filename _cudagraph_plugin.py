@@ -40,6 +40,7 @@ from __future__ import annotations
 import gc
 import math
 import os
+import re
 import statistics
 import sys
 
@@ -88,19 +89,136 @@ def graph_missing_api() -> str:
     return _missing_graph_api(torch)
 
 
+# The mechanism itself reported absent: "CUDA graphs are not supported",
+# "stream capture is not supported", "graph capture not implemented". The subject
+# matters — see _OPERATION_SCOPE_RE for the messages that only *share* the words.
+_GRAPH_MECHANISM_ABSENT_RE = re.compile(
+    r"(?:cuda )?graphs? (?:capture )?(?:is |are )?"
+    r"(?:not supported|unsupported|not available|unavailable|not enabled|disabled|"
+    r"not compiled|not implemented)"
+    r"|(?:stream |graph )?capture (?:is |are )?"
+    r"(?:not supported|unsupported|not available|unavailable|not implemented)", re.I)
+# "operation not supported during graph capture", "graph capture is not supported for
+# this op": an *operation* rejected inside a capture, which says nothing about the
+# mechanism. These reach torch's own frames too — a CUDA/C++ error surfaces through
+# capture_end() in torch/cuda/graphs.py — so the raise site cannot separate them.
+_OPERATION_SCOPE_RE = re.compile(
+    r"(?:during|while|in) (?:the )?(?:cuda )?(?:graph |stream )?captur"
+    r"|for this (?:op|kernel|dtype|shape|module|tensor|input)", re.I)
+_TORCH_GRAPH_DIRS = ("cuda", "_C")  # torch subpackages that own the graph API
+
+
+def _frame_files(exc: BaseException) -> list:
+    """The file of every frame on exc's traceback, innermost last."""
+    files, tb = [], exc.__traceback__
+    while tb is not None:
+        files.append(tb.tb_frame.f_code.co_filename)
+        tb = tb.tb_next
+    return files
+
+
+def _torch_root() -> str:
+    """The installed torch package directory, "" when torch has not been imported."""
+    path = getattr(sys.modules.get("torch"), "__file__", None)
+    return os.path.dirname(os.path.abspath(path)) if path else ""
+
+
+def _inside_torch_graph(exc: BaseException) -> bool:
+    """True when exc was *raised* from torch's own cuda/graph code.
+
+    The raise site (the innermost frame) is what counts: a vendor compatibility
+    layer reports the graph API it does not implement from there, while an
+    operator's failure comes out of the benchmark and kernel frames. Scanning
+    every frame would not do — `torch.cuda.graph()`'s own frames are on both
+    tracebacks, so any captured kernel's error would read as a platform gap."""
+    files = _frame_files(exc)
+    root = _torch_root()
+    if not files or not root:
+        return False
+    try:
+        rel = os.path.relpath(os.path.abspath(files[-1]), root)
+    except ValueError:  # another drive on Windows
+        return False
+    if rel.startswith(os.pardir):
+        return False
+    return rel.split(os.sep)[0] in _TORCH_GRAPH_DIRS or "graph" in rel.lower()
+
+
+_MISSING_ATTR_RE = re.compile(
+    r"(?:module )?'?([\w.]+)'?(?: object)? has no attribute '?([\w.]+)'?")
+
+
+def _owner_name(obj) -> str:
+    """The name an object is known by in an AttributeError: a module's dotted name."""
+    if obj is None:
+        return ""
+    return getattr(obj, "__name__", "") or type(obj).__name__
+
+
+def _missing_attribute(exc: BaseException) -> tuple:
+    """(owner, attribute) an AttributeError reports as missing.
+
+    Python 3.10 fills `name`/`obj` in, so the raise site is taken from there and
+    the message is only the fallback for older interpreters and hand-built
+    exceptions."""
+    name = getattr(exc, "name", "") or ""
+    if name:
+        return _owner_name(getattr(exc, "obj", None)), name
+    found = _MISSING_ATTR_RE.search(str(exc))
+    return (found.group(1), found.group(2)) if found else ("", "")
+
+
+def _names_the_graph_api(msg: str) -> bool:
+    """True when msg names a graph API (CUDAGraph, torch.cuda.graph, a stream, ...)."""
+    return any(api in msg for api in _GRAPH_APIS) or "torch.cuda" in msg
+
+
+def _reports_missing_graph_api(exc: BaseException) -> bool:
+    """True when exc reports a *missing torch.cuda API the graph path needs*.
+
+    Both halves are required. The attribute has to be one `_GRAPH_APIS` names, and
+    the object it is missing from has to be torch.cuda: `'Widget' object has no
+    attribute 'graph'` merely shares the name — an operator's own attribute, not
+    the platform — while a torch.cuda attribute outside the graph API (torch.cuda.foo)
+    says nothing about graph support either. Reading only the name made both of
+    those switch graph timing off for the rest of the op."""
+    owner, name = _missing_attribute(exc)
+    return name in _GRAPH_APIS and owner.startswith("torch.cuda")
+
+
+def _mechanism_absent(exc: Exception, msg: str) -> bool:
+    """True when msg says the graph *mechanism* is absent, not that one operation
+    inside a capture was rejected.
+
+    The scope check comes first: "operation not supported during graph capture" and
+    "graph capture is not supported for this op" name a failing operation, and they
+    reach torch's own frames as well (a CUDA/C++ error surfaces through
+    capture_end()). `NotImplementedError("CUDA graphs")` is a compatibility layer's
+    short way of saying the mechanism is missing."""
+    if _OPERATION_SCOPE_RE.search(msg):
+        return False
+    if _GRAPH_MECHANISM_ABSENT_RE.search(msg):
+        return True
+    return isinstance(exc, NotImplementedError) and _names_the_graph_api(msg)
+
+
 def _graph_mechanism_error(exc: Exception) -> str:
     """Reason when exc means graph timing cannot work on this platform at all, else "".
 
-    A single op that cannot be captured (host sync, OOM, a kernel the graph
-    rejects) must not disable graph timing for the ops after it, so only a
-    missing Python API or an explicit "graphs/capture not supported" counts as
-    the mechanism being absent."""
-    if isinstance(exc, (AttributeError, NotImplementedError)):
-        return f"{type(exc).__name__}: {exc}"
-    msg = str(exc).lower()
-    absent = ("not supported", "unsupported", "not implemented", "unavailable")
-    if any(m in msg for m in absent) and any(c in msg for c in ("graph", "captur")):
-        return " ".join(str(exc).split())[:160]
+    A single call that cannot be captured (host sync, OOM, "operation not permitted
+    when stream is capturing", "operation not supported during graph capture" from a
+    kernel) must keep graph timing for the shapes after it, so only the mechanism
+    itself counts, and it has to say so: the graph API is missing by name, or
+    torch's graph code reports the mechanism as unsupported. A capture-state error,
+    or an operation rejected inside a capture, is that call's failure even when
+    torch raised it."""
+    msg = " ".join(str(exc).split())
+    if isinstance(exc, AttributeError) and _reports_missing_graph_api(exc):
+        return f"AttributeError: {msg}"[:160]
+    if not _inside_torch_graph(exc):
+        return ""
+    if _mechanism_absent(exc, msg):
+        return f"{type(exc).__name__}: {msg}"[:160]
     return ""
 
 

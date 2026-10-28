@@ -174,12 +174,20 @@ def manifest(args: argparse.Namespace) -> dict:
     return out
 
 
+# Fields added after output dirs were already being written: a dir recorded
+# without one resumes on that key's default. Only defaults belong here, so a dir
+# recorded with a non-default value still refuses a run that asks for another.
+LEGACY_DEFAULTS = {"metrics": ""}
+
+
 def check_manifest(args: argparse.Namespace) -> None:
     """Write ab.json, or make sure a resumed dir was run with the same setup."""
     path = args.out / ab_compare.MANIFEST
     want = manifest(args)
     if path.is_file():
         have = json.loads(path.read_text())
+        for key, default in LEGACY_DEFAULTS.items():
+            have.setdefault(key, default)
         diff = [k for k in want if have.get(k) != want[k]]
         if diff:
             raise SystemExit(f"{LOG} {args.out} was run with a different {', '.join(diff)}; "
@@ -232,7 +240,12 @@ def test_target(case: run_batch.Case) -> Optional[str]:
 
 def accuracy_env(args: argparse.Namespace, side: str, gpu: str) -> Dict[str, str]:
     """The side's environment for its unit test: its PYTHONPATH and variables, but
-    none of the benchmark harness's (no replay, no shape set, no dtype filter)."""
+    none of the benchmark harness's (no replay, no shape set, no dtype filter).
+
+    `USE_FLAGTUNE` is not a harness variable: the upstream benchmark reads it to
+    pick its tuning space, so the test must see the value the measured runs get
+    (run_batch._spawn sets it the same way) — otherwise a gate run and the A/B it
+    stands for would test different configurations."""
     env = run_batch.op_env(args.sides[side]["env"])
     for key in ("OP", "OP_FILE", "OUT_DIR", "REPLAY_FROM", "SHAPE_FILE", "DTYPES", "METRICS",
                 "PARALLEL_WARMUP_GPUS", "FLAGGEMS_PERF_IR_DUMP_DIR"):
@@ -241,7 +254,8 @@ def accuracy_env(args: argparse.Namespace, side: str, gpu: str) -> Dict[str, str
     pythonpath = args.sides[side]["pythonpath"]
     if pythonpath:
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [pythonpath, env.get("PYTHONPATH")]))
-    env.update({"CUDA_VISIBLE_DEVICES": gpu, "NO_COLOR": "1", "FLAGGEMS_PERF_COLOR": "never"})
+    env.update({"CUDA_VISIBLE_DEVICES": gpu, "NO_COLOR": "1", "FLAGGEMS_PERF_COLOR": "never",
+                "USE_FLAGTUNE": str(getattr(args, "use_flagtune", 0))})
     if run_batch.accelerator(env) == "metax":
         env["MACA_VISIBLE_DEVICES"] = gpu
     return env

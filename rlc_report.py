@@ -23,7 +23,9 @@ Definitions (matching the hand-made table):
   cvt     sum of ttg.convert_layout over the op's changed kernels, base -> new
 
 The table only orders and names the ops when --table is given; every op found in
-the CSV is still reported.
+the CSV is still reported. Rows whose dtype has no column here (float32, int32,
+...) still count towards the op's saving/cost, and the note names them, so a
+filtered view is not mistaken for a missing result.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ import csv
 import json
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
@@ -254,6 +256,42 @@ def fp8_type(dtypes: List[str]) -> str:
     return "complex64" if any("complex" in d for d in dtypes) else "fp8"
 
 
+def row_entry(table: Optional[Dict[Tuple[str, str, str, int], List[str]]],
+              run: str, op_name: str, dtype: str, row: int) -> List[str]:
+    """The gate/kernels entry for one result row, with the same "" fallback
+    ab_compare.gate_flag() applies: a single-op gate records its run as "" (see
+    ir_gate.py's RunDir.run), so a report built against such a gate must fall back
+    too — otherwise every row reads as "kernel unchanged"."""
+    if not table:
+        return []
+    return table.get((run, op_name, dtype, row)) or table.get(("", op_name, dtype, row)) or []
+
+
+def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
+              notes: Dict[str, str], label: str) -> List[str]:
+    """The warnings a set of result rows carries: do_bench timing with its reason, a
+    replay/config mismatch, unchanged kernels despite a difference, the manual note.
+
+    Both the dtype group and the op call this with the rows they own — the op with
+    all of them — so a warning that only a row of a column-less dtype (float32, ...)
+    carries still reaches the op's note."""
+    flags = {f for r in rows for f in r.flags.split(";") if f}
+    out = []
+    if "do_bench" in flags:
+        why = sorted({(reasons or {}).get(r.run, "") for r in rows
+                      if "do_bench" in r.flags.split(";")} - {""})
+        out.append("do_bench 计时" + (f"（{'；'.join(why)}）" if why else ""))
+    if "replay_fallback" in flags:
+        out.append("replay 回退，config 不一致")
+    if rows and all(r.gate == "unchanged" for r in rows) and \
+            any(r.verdict in ("faster", "slower") for r in rows):
+        out.append("指令未增删")
+    manual = notes.get(label) or (notes.get(rows[0].op_name) if rows else "")
+    if manual:
+        out.append(manual)
+    return out
+
+
 def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]],
                 gate_dir: Optional[Path], notes: Dict[str, str], label: str,
                 group: str, reasons: Optional[Dict[str, str]] = None,
@@ -261,30 +299,17 @@ def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]
     gains = [r for r in rows if r.gap > 0]
     losses = [r for r in rows if r.gap < 0]
     total = len(rows)
-    changed_hashes = sorted({h for r in rows for h in gate.get(
-        (r.run, r.op_name, r.dtype, r.row), [])})
+    changed_hashes = sorted({h for r in rows
+                             for h in row_entry(gate, r.run, r.op_name, r.dtype, r.row)})
     all_hashes = sorted({h for r in rows for h in (
-        gate.get((r.run, r.op_name, r.dtype, r.row), []) or
-        (kernels or {}).get((r.run, r.op_name, r.dtype, r.row), []))})
+        row_entry(gate, r.run, r.op_name, r.dtype, r.row) or
+        row_entry(kernels, r.run, r.op_name, r.dtype, r.row))})
     hashes = changed_hashes or all_hashes
     unchanged = not changed_hashes and bool(all_hashes)
     cvt_before = cvt_after = None
     if hashes:
         cvt_before, cvt_after = cvt_counts(gate_dir, hashes)
-    flags = {f for r in rows for f in r.flags.split(";") if f}
-    note = []
-    if "do_bench" in flags:
-        why = sorted({(reasons or {}).get(r.run, "") for r in rows
-                      if "do_bench" in r.flags.split(";")} - {""})
-        note.append("do_bench 计时" + (f"（{'；'.join(why)}）" if why else ""))
-    if "replay_fallback" in flags:
-        note.append("replay 回退，config 不一致")
-    if rows and all(r.gate == "unchanged" for r in rows) and \
-            any(r.verdict in ("faster", "slower") for r in rows):
-        note.append("指令未增删")
-    manual = notes.get(label) or notes.get(rows[0].op_name)
-    if manual:
-        note.append(manual)
+    note = row_notes(rows, reasons, notes, label)
     return {
         "rows": total,
         "dtypes": sorted({r.dtype for r in rows}),
@@ -305,6 +330,48 @@ def build_groups(rows: List[Row]) -> List[Group]:
             by[r.label][group].append(r)
     return [Group(label, group, rs) for label, groups in by.items()
             for group, rs in groups.items()]
+
+
+def ungrouped_note(rows: List[Row]) -> str:
+    """Note for the rows whose dtype the table has no column for (float32, ...).
+
+    They are not shown per dtype, but they are neither dropped nor hidden: the op
+    list and its saving/cost include them, and this note says which dtypes carry
+    them, so a table without a float32 column does not read as "float32 is fine"."""
+    counts = Counter(r.dtype for r in rows if dtype_group(r.dtype) is None)
+    if not counts:
+        return ""
+    shown = ", ".join(f"{dtype.replace('torch.', '')} {n} 行"
+                      for dtype, n in sorted(counts.items()))
+    return f"{shown} 未按 dtype 分列"
+
+
+def op_entry(label: str, rows: List[Row], groups: Dict[str, List[Row]],
+             gate: Dict[Tuple[str, str, str, int], List[str]],
+             gate_dir: Optional[Path], notes: Dict[str, str], reasons: Dict[str, str],
+             kernels: Dict[Tuple[str, str, str, int], List[str]]) -> dict:
+    """One table row: the per-dtype statistics of the op, plus its saving/cost and
+    its warnings over every row it has — rows of a dtype without a column included.
+
+    So an op that only ran float32 still appears, its change is not lost, and a
+    warning only that dtype carries (do_bench timing, a replay/config mismatch, a
+    manual note) still reaches the table: those rows are in no group's note. A
+    warning only *one dtype's* rows produce is kept too, prefixed with that dtype
+    ("bf16 指令未增删"): the table has one note per op, and "these rows kept their
+    kernels" stops being true for the op as soon as another dtype changed."""
+    stats = {group: summarizing(rs, gate, gate_dir, notes, label, group, reasons, kernels)
+             for group, rs in groups.items()}
+    saving = max((r.a_ms - r.b_ms for r in rows), default=0.0)
+    cost = max((r.b_ms - r.a_ms for r in rows), default=0.0)
+    merged = row_notes(rows, reasons, notes, label)
+    for group, group_rows in groups.items():
+        for text in row_notes(group_rows, reasons, notes, label):
+            labelled = f"{group} {text}"
+            if text not in merged and labelled not in merged:
+                merged.append(labelled)
+    note = "；".join(text for text in dict.fromkeys(merged + [ungrouped_note(rows)]) if text)
+    return {"label": label, "rows": len(rows), "groups": stats,
+            "saving": max(saving, 0.0), "cost": max(cost, 0.0), "note": note}
 
 
 def load_sources(path: Optional[Path]) -> Dict[str, dict]:
@@ -467,7 +534,7 @@ def main() -> None:
     reasons = load_do_bench_reasons(args.ab_dir or args.csv.parent)
     kernels = load_run_kernels(args.ab_dir or args.csv.parent)
     groups = build_groups(rows)
-    labels = sorted({g.label for g in groups})
+    labels = sorted({r.label for r in rows})  # every op in the CSV, grouped or not
     order = read_table_order(args.table, labels)
     labels.sort(key=lambda label: (order.get(label, len(order)), label))
     op_names = defaultdict(int)
@@ -478,23 +545,18 @@ def main() -> None:
         op_names[op] += 1
         op_files[(repo, op)].add(op_file)
 
-    by_label: Dict[str, Dict[str, List[Row]]] = defaultdict(dict)
+    by_label: Dict[str, List[Row]] = defaultdict(list)
+    for r in rows:
+        by_label[r.label].append(r)
+    grouped: Dict[str, Dict[str, List[Row]]] = defaultdict(dict)
     for g in groups:
-        by_label[g.label][g.dtype] = g.rows
+        grouped[g.label][g.dtype] = g.rows
 
     out = []
     for label in labels:
-        groups_of = by_label[label]
-        all_rows = [r for rs in groups_of.values() for r in rs]
-        stats = {group: summarizing(rs, gate, args.gate, notes, label, group,
-                                    reasons, kernels)
-                 for group, rs in groups_of.items()}
-        saving = max((r.a_ms - r.b_ms for r in all_rows), default=0.0)
-        cost = max((r.b_ms - r.a_ms for r in all_rows), default=0.0)
-        note = "；".join(dict.fromkeys(s["note"] for s in stats.values() if s["note"]))
-        out.append({"name": display_name(label, op_names, sources, op_files), "label": label,
-                    "rows": len(all_rows), "groups": stats,
-                    "saving": max(saving, 0.0), "cost": max(cost, 0.0), "note": note})
+        out.append({"name": display_name(label, op_names, sources, op_files),
+                    **op_entry(label, by_label[label], grouped[label], gate, args.gate,
+                               notes, reasons, kernels)})
 
     write_xlsx(args.out, out, args.title, args.env)
     print(f"{LOG} {len(out)} ops, {len(rows)} rows -> {args.out}", flush=True)

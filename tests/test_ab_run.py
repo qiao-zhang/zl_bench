@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+import ab_compare
 import ab_run
 import run_batch
 
@@ -108,9 +109,58 @@ def _case(repo="main", op="softmax", op_file=None):
 
 def _gate_args(tmp_path):
     return argparse.Namespace(
-        out=tmp_path / "ab", accuracy_timeout=60,
+        out=tmp_path / "ab", accuracy_timeout=60, use_flagtune=0,
         sides={"a": {"name": "A", "pythonpath": "", "env": {}},
                "b": {"name": "B", "pythonpath": "", "env": {}}})
+
+
+def _manifest_args(tmp_path, **kw):
+    base = dict(out=tmp_path / "ab", record=tmp_path / "rec", dtypes="", metrics="",
+                shape_file=None, use_flagtune=0, accuracy_gate=False,
+                sides={"a": {"name": "A", "pythonpath": "", "env": {}},
+                       "b": {"name": "B", "pythonpath": "", "env": {}}})
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_accuracy_env_uses_the_measured_tuning_space(monkeypatch, tmp_path):
+    """--use-flagtune reaches the unit test as USE_FLAGTUNE, exactly as run_batch._spawn
+    passes it to the measured runs: the upstream benchmark picks its tuning space from
+    that variable, so a gate run must not verify a different configuration than the
+    A/B it stands for — neither a shell value nor a side's own --a-env may win."""
+    monkeypatch.setenv("USE_FLAGTUNE", "0")  # the shell value the CLI overrides
+    args = _gate_args(tmp_path)
+    args.use_flagtune = 1
+    assert ab_run.accuracy_env(args, "a", "0")["USE_FLAGTUNE"] == "1"
+
+    args = _gate_args(tmp_path)
+    args.sides["a"]["env"] = {"USE_FLAGTUNE": "1"}  # a side that asks for the other space
+    args.use_flagtune = 0
+    assert ab_run.accuracy_env(args, "a", "0")["USE_FLAGTUNE"] == "0"
+
+
+def test_check_manifest_resumes_a_dir_recorded_before_metrics(tmp_path):
+    """ab.json written before --metrics existed has no such key; resuming that dir
+    with the default metric list must not look like a different setup."""
+    args = _manifest_args(tmp_path)
+    args.out.mkdir()
+    (args.out / ab_compare.MANIFEST).write_text(json.dumps({
+        "record": str(args.record), "sides": args.sides, "dtypes": "",
+        "shape_file": "", "use_flagtune": 0}))
+    ab_run.check_manifest(args)  # no SystemExit
+    # An explicitly different metric list still refuses to continue that dir.
+    with pytest.raises(SystemExit, match="different metrics"):
+        ab_run.check_manifest(_manifest_args(tmp_path, metrics="latency"))
+
+
+def test_check_manifest_refuses_another_setup(tmp_path):
+    args = _manifest_args(tmp_path)
+    ab_run.check_manifest(args)  # writes ab.json
+    assert json.loads((args.out / ab_compare.MANIFEST).read_text())["metrics"] == ""
+    with pytest.raises(SystemExit, match="different dtypes"):
+        ab_run.check_manifest(_manifest_args(tmp_path, dtypes="bfloat16"))
+    with pytest.raises(SystemExit, match="different use_flagtune"):
+        ab_run.check_manifest(_manifest_args(tmp_path, use_flagtune=1))
 
 
 def _row(status, detail=""):
