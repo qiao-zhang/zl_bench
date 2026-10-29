@@ -1,0 +1,148 @@
+# PPU 可跑算子清单：由 ops/key_ops.txt 过滤而来（只保留实测 PASS 的 47 条）。
+# 依据：runs/ppu/key_multi_261026/base 的批次状态（122 条 -> PASS 47 / SKIP 65 / FAIL 10）。
+#   批次参数：--shape-file shape/all_ops_multi.yaml --env FLAGTREE_RLC_ENHANCE=0 --metrics latency
+# 去掉的 75 条 = SKIP（pytest skip，上游 skipif 在 PPU 上不成立）+ FAIL（下列 10 条）。
+# FAIL 的原因：PPU 缺 TLE 原语（pipe）、上游 kernel 只适用 NVIDIA、本机 vllm 装不全。
+# 换机器或换 FlagTree 版本后重跑，这张表要按新结果重生成。
+#
+# FAIL（未收录）：
+#   vllm:fused_add_rms_norm
+#   main:flash_attn_varlen_func
+#   main:perf_router_gemm@router_gemm
+#   vllm:fused_q_kv_rmsnorm_benchmark
+#   vllm:fp8_fp4_paged_mqa_logits
+#   vllm:flash_attn_varlen_func
+#   main:glu
+#   vllm:perf_chunk_gated_delta_rule_fwd
+#   vllm:fp8_fp4_mqa_logits
+#   vllm:perf_chunk_gla
+
+# mm
+main:mm@mm
+
+# sparse_attn_triton
+main:sparse_attn_triton@sparse_attention
+
+# baddbmm
+main:baddbmm@baddbmm
+
+# bmm
+main:bmm@bmm
+
+# addmm
+main:addmm@addmm
+
+# mv
+main:mv@mv
+
+# fused_deepseek_v4_qnorm_rope_kv_rope_insert
+#   备注：vllm 仅有 ..._quant_insert 变体，无本算子
+main:fused_deepseek_v4_qnorm_rope_kv_rope_insert@fused_deepseek_v4_qnorm_rope_kv_rope_insert
+
+# moe_align_block_size
+#   备注：inventory 命名为 moe_align_block_size_triton
+main:moe_align_block_size_fast_paths@moe_align_block_size_triton
+
+# topk
+#   备注：vllm 无同名算子（仅有 topk_softmax / top_k_per_row_* / persistent_topk）
+main:topk@topk
+
+# fused_add_rms_norm
+main:fused_add_rms_norm@fused_add_rms_norm
+
+# per_token_group_quant_fp8
+main:per_token_group_quant_fp8@per_token_group_quant_fp8
+
+# grouped_topk
+vllm:grouped_topk_no_renorm@grouped_topk
+vllm:grouped_topk_score_0@grouped_topk
+vllm:grouped_topk_score_1@grouped_topk
+
+# rms_norm
+#   备注：vllm 无同名算子（仅有 gemma_rms_norm / add_rms_norm 等）
+main:rms_norm@rms_norm
+
+# mhc_pre
+main:mhc_pre@mhc
+vllm:mhc_pre@mhc
+
+# mhc_post
+main:mhc_post@mhc
+
+# mul
+main:mul@mul
+
+# router_gemm
+main:perf_router_gemm@blas_perf_parallel
+vllm:perf_router_gemm@blas_perf_parallel
+vllm:perf_router_gemm@router_gemm
+
+# indexer_k_quant_and_cache
+#   备注：inventory 的 op 带 _benchmark 后缀，op_names 为空
+vllm:indexer_k_quant_and_cache_benchmark@indexer_k_quant_and_cache
+
+# combine_topk_swa_indices
+#   备注：inventory 的 op 带 _benchmark 后缀，op_names 为空
+vllm:combine_topk_swa_indices_benchmark@deepseek_v4_attention_combine_topk_swa_indices
+
+# group_mm
+#   备注：inventory 命名为 grouped_mm；vllm 无
+main:grouped_mm@grouped_mm
+
+# swiglu
+main:swiglu@swiglu
+vllm:swiglu@swiglu
+
+# dequantize_and_gather_k_cache
+vllm:dequantize_and_gather_k_cache_benchmark@deepseek_v4_attention_dequantize_and_gather_k_cache
+
+# apply_rotary_pos_emb
+main:apply_rotary_pos_emb@apply_rotary_pos_emb
+vllm:apply_rotary_pos_emb@apply_rotary_pos_emb
+
+# conv2d
+#   备注：vllm 无
+main:conv2d@conv2d
+
+# add_rms_norm
+main:add_rms_norm@add_rms_norm
+vllm:add_rms_norm@add_rms_norm
+
+# chunk_gated_delta_rule_fwd
+main:perf_chunk_gated_delta_rule_fwd@FLA/test_chunk_gated_delta_rule_fwd
+
+# topk_softplus_sqrt
+main:topk_softplus_sqrt@topk_softplus_sqrt
+#   备注：vllm 另有 _tle / _hash 变体，未列
+vllm:topk_softplus_sqrt@topk_softplus_sqrt
+
+# top_k_per_row_decode
+vllm:top_k_per_row_decode@top_k_per_row_decode
+
+# gemma_rms_norm_kernel
+#   备注：inventory 命名为 gemma_rms_norm；main 无
+vllm:gemma_rms_norm@gemma_rms_norm
+
+# top_k_per_row_prefill
+main:top_k_per_row_prefill@top_k_per_row_prefill
+vllm:top_k_per_row_prefill@top_k_per_row_prefill
+
+# flash_mla
+main:flash_mla@flash_mla
+vllm:flash_mla@flash_mla
+
+# chunk_gdn2
+#   备注：仅 vllm
+vllm:chunk_gdn2@FLA/test_chunk_gdn2
+
+# moe_sum
+main:moe_sum@moe_sum
+vllm:moe_sum@moe_sum
+
+# chunk_kda
+#   备注：仅 vllm
+vllm:chunk_kda@FLA/test_chunk_kda
+
+# persistent_topk
+#   备注：仅 vllm
+vllm:persistent_topk@persistent_topk
