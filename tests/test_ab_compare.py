@@ -40,6 +40,20 @@ def test_nocg_tables_marks_every_table_of_a_process_wide_fallback():
                                                 ("softmax", "torch.float16")}
 
 
+def test_nocg_tables_ignores_the_plugin_banner():
+    """The cudagraph plugin's startup banner names the marker without reporting a
+    fallback ("... falls back to do_bench with a BENCHMARK_DIRECT_NO_CUDAGRAPH
+    marker ..."). Reading the name alone marked the first table of every run.log as
+    plain do_bench, which turned every op's note into a do_bench warning."""
+    banner = ("[cudagraph-plugin] triton.testing.do_bench → CUDA-graph timing (at most 1000 "
+              "calls per graph); a call that cannot be captured falls back to do_bench with a "
+              "BENCHMARK_DIRECT_NO_CUDAGRAPH marker (skipped for the rest of the op when the "
+              "platform has no graph support)\n")
+    text = (banner + _log([0.1])
+            + banner + HEADER.replace("bfloat16", "float16") + _log([0.2]))
+    assert ab_compare.nocg_tables(text) == set()
+
+
 def test_parse_range():
     assert ab_compare.parse_range(None) is None
     assert ab_compare.parse_range("7-12") == (7, 12)

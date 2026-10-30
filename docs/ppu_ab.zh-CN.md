@@ -27,11 +27,17 @@
   `ab_run.py --a-env/--b-env` 完成，不要试图在测试内部改。
 - 本 A/B 在 PPU 上跑，A 侧必须显式写 `=0`（默认值就是关，但显式写可防止环境里残留变量），
   B 侧写 `=1`。
-- 子开关：README 提到 RLC 还有四个子特性（`enable-rlc-enhance-cost-based`、
-  `enable-rlc-enhance-backward-propagation`、`enable-rlc-enhance-small-component-solving`
-  默认开启；`enable-rlc-enhance-store-layout-rematerialization` 曾在 PPU 后端被显式关闭）。
-  当前工作树的三处调用传的是 `True`，即 rematerialization 也开启。若你的构建里该参数是
-  `False`，B 侧只生效 4/5 个子特性，报告里需注明这一口径。
+- 子开关：RLC 的四个子特性（`enable-rlc-enhance-cost-based`、
+  `enable-rlc-enhance-backward-propagation`、`enable-rlc-enhance-small-component-solving`、
+  `enable-rlc-enhance-store-layout-rematerialization`）在 `python/src/passes.cc` 里默认都是 `True`；
+  自 FlagTree commit `17288c4b4`（`enable rlc enhance for ppu`，2026-10-26）起，PPU 后端
+  `third_party/ppu/backend/compiler.py` 三处调用都是
+  `add_remove_layout_conversions(pm, knobs.ppu.rlc_enhance, enable_rlc_enhance_store_layout_remat=True)`，
+  即 B 侧是 **5/5 全开**（更早的构建若仍硬编码 `False`，B 侧只生效 4/5，报告里需注明这一口径）。
+- 生效前提：这四个子开关只有在构建时定义了 `__FLAGTREE_RLC_ENHANCE__` 才会被
+  `passes.cc` 的 `#ifdef` 分支透传（`FLAGTREE_BACKEND=ppu` 时由 `cmake/FlagTreeOptions.cmake`
+  自动加这个宏）。缺宏时参数被整体丢弃、RLC 完全不生效，A/B 两侧会编出同一份二进制——门控里
+  该算子全是 `unchanged`，正好可以用来自检这份构建是否带 RLC。
 
 ---
 
@@ -320,7 +326,22 @@ runs/rlc_ppu_key_ab/                    # A/B
 - `BENCHMARK_DIRECT_NO_CUDAGRAPH`：该调用无法 graph capture，改用普通 `do_bench` 计时，
   噪声更大，亚毫秒 kernel 尤其明显。
 
-`ab_compare.py` 会在 `flags` 列标出这些情况。
+`ab_compare.py` 会在 `flags` 列标出这些情况；只有带 `op=... phase=...` 的动态标记才算一次回退，
+插件启动横幅里提到的标记名不算。
+
+**注意标记的粒度是「表」，不是「行」**：`ab_compare.nocg_tables()` 以 `(op_name, dtype)` 为单位判定，
+表内只要有一次回退标记，整张表都会被标记，随后该表**所有结果行**都会带上 `do_bench`（`rows.csv` 的
+`flags` / `timer` 列同理）。所以 `rlc_report.py` 备注写的是保守口径：
+
+```text
+do_bench 计时（表级标记覆盖 3/8 行；host 同步）
+```
+
+含义是「这条备注覆盖的 8 行里，有 3 行所在的表带回了回退标记」，**不是**「3 行真的回退、其余 5 行
+仍是 CUDA graph 计时」：同表内一次回退就会让整表所有行都被计入（8 个 shape 只有 1 个回退时，组级备注
+会显示 8/8）；只有在备注跨多张表汇总时（算子级备注会合并多个 dtype）才会出现小于 1 的分数。
+要拿到真实回退行数，必须先让标记带上 shape/测量的身份（当前 marker 只有 `op=`/`phase=`/`reason=`），
+仅调整备注计数并不能还原。
 
 ---
 

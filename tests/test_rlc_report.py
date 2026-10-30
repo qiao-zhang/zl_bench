@@ -2,6 +2,7 @@ import sys
 
 import pytest
 
+import ab_compare
 import rlc_ops
 import rlc_report
 
@@ -346,7 +347,7 @@ def test_op_entry_keeps_the_warnings_of_an_ungrouped_dtype():
     entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None,
                                 {"main:kron@kron": "手工：选到不同 autotune"},
                                 {"main/kron": "host 同步"}, {})
-    assert "do_bench 计时（host 同步）" in entry["note"]
+    assert "do_bench 计时（表级标记覆盖 1/1 行；host 同步）" in entry["note"]
     assert "replay 回退，config 不一致" in entry["note"]
     assert "手工：选到不同 autotune" in entry["note"]
     assert "float32 1 行" in entry["note"]
@@ -661,4 +662,56 @@ def test_summarizing_appends_the_do_bench_reason():
     rows = [_row(gap=-0.2, flags="do_bench", verdict="slower")]
     stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16",
                                    {"main/kron": "host 同步"})
-    assert "do_bench 计时（host 同步）" in stats["note"]
+    assert "do_bench 计时（表级标记覆盖 1/1 行；host 同步）" in stats["note"]
+
+
+def test_do_bench_note_counts_the_rows_each_way():
+    """Rows of one (op, dtype) table all carry the flag once the table is marked, so a
+    partial count only comes from a hand-built or historical CSV. The note still names
+    both counts, and says 表级标记 so the number is not read as a fallback ratio."""
+    rows = [_row(gap=0.1, row=0, flags="do_bench"),
+            _row(gap=0.2, row=1),
+            _row(gap=0.3, row=2)]
+    stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16",
+                                   {"main/kron": "host 同步"})
+    assert "do_bench 计时（表级标记覆盖 1/3 行；host 同步）" in stats["note"]
+    rows = [_row(gap=0.1, row=0, flags="do_bench"), _row(gap=0.2, row=1, flags="do_bench")]
+    stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16")
+    assert "do_bench 计时（表级标记覆盖 2/2 行）" in stats["note"]
+
+
+def test_one_fallback_marker_marks_the_whole_table_end_to_end(tmp_path):
+    """The note is a table-level warning, and this is the path that shows why: a run.log
+    with ONE fallback marker and an 8-row table comes back with all 8 rows flagged, so
+    the note reads 8/8 — a reader must not take that as "8 shapes fell back"."""
+    header = "Operator: kron  (dtype=torch.bfloat16, mode=kernel, level=core)\n"
+    body = "".join(f"SUCCESS  0.010000  {0.1 + i / 100:.6f}  1.000  [torch.Size([{i + 1}])]\n"
+                   for i in range(8))
+    marker = ("BENCHMARK_DIRECT_NO_CUDAGRAPH op=kron phase=host_sync reason=_HostSync "
+              "detail='tensor.item()'\n")
+    for side, prefix in (("a", marker), ("b", "")):
+        run = tmp_path / f"r1_{side}" / "main" / "kron"
+        run.mkdir(parents=True)
+        (run / "run.log").write_text(prefix + header + body, encoding="utf-8")
+
+    samples = ab_compare.load_samples(tmp_path)
+    assert len(samples) == 8
+    assert all(s.nocg for s in samples)          # one marker, eight flagged rows
+    rows = [rlc_report.Row("main:kron@kron", s.run, s.op_name, s.dtype, s.row, 0.0,
+                           s.a[0], s.b[0], "changed",
+                           "do_bench" if s.nocg else "", "same")
+            for s in samples]
+    stats = rlc_report.summarizing(rows, {}, None, {}, "main:kron@kron", "bf16",
+                                   {"main/kron": "host 同步"})
+    assert "do_bench 计时（表级标记覆盖 8/8 行；host 同步）" in stats["note"]
+
+
+def test_do_bench_note_counts_rows_behind_marked_tables():
+    """A fraction below 1 means the note spans several tables, not that some rows fell
+    back: here the bf16 table is marked (2 rows) and the fp16 one is not (2 rows), so the
+    op's note reads 2/4 in the marked-tables sense."""
+    rows = [_row(row=0, flags="do_bench"), _row(row=1, flags="do_bench"),
+            _row(row=2, dtype="torch.float16"), _row(row=3, dtype="torch.float16")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert "do_bench 计时（表级标记覆盖 2/4 行）" in entry["note"]

@@ -38,3 +38,13 @@ def test_marker_notes():
             + "AUTOTUNE_REPLAY_FALLBACK reason=key_missing\n")
     assert batch_summary.marker_notes(text) == "no_cudagraph_rows=2;replay_fallback=1"
     assert batch_summary.marker_notes("") == ""
+
+
+def test_marker_notes_ignores_the_plugin_banner():
+    """The cudagraph plugin's banner names the marker without reporting a fallback;
+    counting the bare name gave every op `no_cudagraph_rows=1`."""
+    banner = ("[cudagraph-plugin] triton.testing.do_bench → CUDA-graph timing (at most "
+              "1000 calls per graph); a call that cannot be captured falls back to "
+              "do_bench with a BENCHMARK_DIRECT_NO_CUDAGRAPH marker (skipped for the "
+              "rest of the op when the platform has no graph support)\n")
+    assert batch_summary.marker_notes(banner) == ""

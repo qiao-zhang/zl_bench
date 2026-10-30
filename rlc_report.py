@@ -312,11 +312,12 @@ def unconfirmed(row: Row) -> bool:
 
 def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
               notes: Dict[str, str], label: str, dropping: bool = True) -> List[str]:
-    """The warnings a set of result rows carries: do_bench timing with its reason, a timer
-    that differs between the two sides of a round, whatever the recheck settled (mixed
-    clocks, too few rounds, or not reproduced — one note each), a generic note for an
-    unconfirmed row whose reason this CSV does not carry (a dropped `confirm` column),
-    a replay/config mismatch, unchanged kernels despite a difference, the manual note.
+    """The warnings a set of result rows carries: do_bench timing with its reason and how
+    many of the rows it covers, a timer that differs between the two sides of a round,
+    whatever the recheck settled (mixed clocks, too few rounds, or not reproduced — one
+    note each), a generic note for an unconfirmed row whose reason this CSV does not
+    carry (a dropped `confirm` column), a replay/config mismatch, unchanged kernels
+    despite a difference, the manual note.
 
     They stay apart on purpose: a mismatched main round makes that row's gap
     uncomparable, a refused recheck only means the main-round verdict was never
@@ -325,15 +326,25 @@ def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
     (they are excluded by default), so every note states whether its numbers contain
     them, and how many.
 
+    The do_bench note is a table-level warning, not a per-row fallback count.
+    ab_compare.nocg_tables() decides per (op_name, dtype) table: one fallback marker
+    marks the whole table and every row of it then carries `flags=do_bench`. So
+    "do_bench 计时（表级标记覆盖 3/8 行；host 同步）" reads "the tables behind 3 of the
+    8 rows here carry a fallback marker" — a single shape falling back already yields
+    the table's every row, and a fraction below 1 only appears when the note spans
+    several tables (the op's note merges dtypes). It is not a fallback ratio, and the
+    markers carry no per-shape identity to compute one from.
+
     Both the dtype group and the op call this with the rows they own — the op with
     all of them — so a warning that only a row of a column-less dtype (float32, ...)
     carries still reaches the op's note."""
     flags = {f for r in rows for f in r.flags.split(";") if f}
     out = []
     if "do_bench" in flags:
-        why = sorted({(reasons or {}).get(r.run, "") for r in rows
-                      if "do_bench" in r.flags.split(";")} - {""})
-        out.append("do_bench 计时" + (f"（{'；'.join(why)}）" if why else ""))
+        bench = [r for r in rows if "do_bench" in r.flags.split(";")]
+        why = sorted({(reasons or {}).get(r.run, "") for r in bench} - {""})
+        out.append(f"do_bench 计时（表级标记覆盖 {len(bench)}/{len(rows)} 行"
+                   + (f"；{'；'.join(why)}" if why else "") + "）")
     mismatched = [r for r in rows if "timer_mismatch" in r.flags.split(";")]
     if mismatched:
         tail = (f"未计入收益/损失汇总，{len(mismatched)} 行" if dropping else "仍计入汇总")

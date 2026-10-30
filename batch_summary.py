@@ -35,7 +35,10 @@ NUM_TOKEN_RE = re.compile(
     r"|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$"
 )
 PYTEST_SKIPPED_RE = re.compile(r"(?P<n>\d+)\s+(?:skipped|xfailed)\b")
-DIRECT_NO_CUDAGRAPH_RE = re.compile(r"BENCHMARK_DIRECT_NO_CUDAGRAPH\b")
+# A reported fallback, not the cudagraph plugin's startup banner: the banner names the
+# marker ("... with a BENCHMARK_DIRECT_NO_CUDAGRAPH marker ...") without an op or a
+# phase, so counting the bare name gave every op a no_cudagraph_rows note.
+DIRECT_NO_CUDAGRAPH_RE = re.compile(r"BENCHMARK_DIRECT_NO_CUDAGRAPH op=\S+ phase=\w+")
 REPLAY_FALLBACK_RE = re.compile(r"AUTOTUNE_REPLAY_FALLBACK\b")
 
 SUMMARY_FIELDS = [

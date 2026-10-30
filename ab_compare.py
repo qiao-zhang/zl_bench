@@ -127,13 +127,20 @@ def nocg_tables(text: str) -> set:
     measured, before that table's header, so it marks the header that follows.
     A process-wide one (`phase=capability`, `phase=disabled`) is printed once for
     the whole op -- the plugin reports it on the first measurement and stays
-    quiet -- so it marks every table of that run.log, not just the first."""
+    quiet -- so it marks every table of that run.log, not just the first.
+
+    Only a marker carrying `phase=` counts. The cudagraph plugin's startup banner
+    names the marker ("... falls back to do_bench with a BENCHMARK_DIRECT_NO_CUDAGRAPH
+    marker ...") without reporting a fallback; reading the name alone marked the
+    first table of every run.log as plain do_bench."""
     out, pending, process_wide = set(), 0, False
     for line in text.splitlines():
         s = line.strip()
         if NOCG in s:
             phase = _NOCG_PHASE_RE.search(s)
-            if phase and phase.group(1) in _NOCG_PROCESS_PHASES:
+            if phase is None:
+                continue  # the banner, not a fallback report
+            if phase.group(1) in _NOCG_PROCESS_PHASES:
                 process_wide = True
             else:
                 pending += 1
