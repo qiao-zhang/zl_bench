@@ -8,7 +8,7 @@ ir_gate.py output for the layout-conversion counts:
   python rlc_report.py --csv runs/ab_x/rows.csv --gate runs/gate_x \\
       --table ops/rlc_table.csv --notes ops/rlc_notes.csv --out rlc_report.xlsx
 
-One row per op; columns grouped by dtype (bf16 / fp16 / fp8-complex64), each
+One row per op; columns grouped by dtype (bf16 / fp16 / float32 / fp8-complex64), each
 with the weakest and strongest gain, the lightest and heaviest regression and
 how many shapes they cover, plus the ttg.convert_layout count before -> after
 from the gate. The last columns are the largest absolute saving/cost and a note.
@@ -30,11 +30,22 @@ the row count, and --include-unconfirmed counting them again:
   confirm=insufficient_rounds    the recheck had fewer than three rounds
   confirm=not_reproduced         the recheck did not reproduce the verdict
 
+The rows of an op a side's unit test rejects (the CSV's `accuracy` cell carries a
+fail/timeout/error, or `flags` carries `accuracy_failed`) are kept out too, and
+--include-accuracy-failed counts them again: ab_run.py --accuracy-gate leaves the
+rounds of an earlier invocation on disk, so the row is still shown, but a saving
+measured from a build the test rejected is not a saving of the current compiler.
+`no_test` and an empty cell are not failures — the gate never ran, or had nothing to
+run. Every note's "counted / left out" tail is computed from the same `excluded()` the
+summaries use, over that note's own rows: a row carrying both marks (a rejected op and
+an unconfirmed recheck) is never reported as counted while the other reason still keeps
+it out, and a note whose rows only partly count says "其中 M 行未计入汇总".
+
 A plain undecided row (no confirm) stays in the summaries: nothing was measured
 against it.
 
 The table only orders and names the ops when --table is given; every op found in
-the CSV is still reported. Rows whose dtype has no column here (float32, int32,
+the CSV is still reported. Rows whose dtype has no column here (int8, int32,
 ...) still count towards the op's saving/cost, and the note names them, so a
 filtered view is not mistaken for a missing result.
 """
@@ -54,10 +65,15 @@ LOG = "[rlc-report]"
 DTYPE_GROUPS = (
     ("bf16", ("torch.bfloat16",)),
     ("fp16", ("torch.float16", "torch.half")),
+    ("float32", ("torch.float32",)),
     ("fp8 / complex64", ("torch.float8_e4m3fn", "torch.float8_e5m2", "torch.float8_e4m3fnuz",
                          "torch.float8_e5m2fnuz", "torch.complex64", "torch.complex128")),
 )
-COLUMNS = ("#", "算子", "bf16", "fp16", "fp8 / complex64", "最大绝对变化", "备注")
+# Groups whose column block starts with a `类型` cell naming the exact dtype (fp8 and
+# complex64 share one block, so the cell says which of them the numbers belong to).
+TYPED_GROUPS = ("fp8 / complex64",)
+COLUMNS = ("#", "算子", "bf16", "fp16", "float32", "fp8 / complex64",
+           "最大绝对变化", "备注")
 
 
 class Row(NamedTuple):
@@ -75,6 +91,8 @@ class Row(NamedTuple):
     # ab_compare.py --csv: "", confirmed, not_reproduced, or timer_mismatch (the recheck
     # could not confirm because its own rounds mixed two clocks).
     confirm: str = ""
+    # ab_compare.py --csv: `a:pass,b:pass`, `a:pass,b:fail`, ... or "" without a gate.
+    accuracy: str = ""
 
 
 class Group(NamedTuple):
@@ -91,7 +109,7 @@ def read_ab_csv(path: Path) -> List[Row]:
                 out.append(Row(r["op"], r["run"], r["op_name"], r["dtype"], int(r["row"]),
                                float(r["gap"]), float(r["median_a_ms"]), float(r["median_b_ms"]),
                                r.get("gate", ""), r.get("flags", ""), r.get("verdict", ""),
-                               r.get("confirm") or ""))
+                               r.get("confirm") or "", r.get("accuracy") or ""))
             except (KeyError, ValueError) as exc:
                 raise SystemExit(f"{LOG} bad row in {path}: {r} ({exc})") from exc
     return out
@@ -310,8 +328,58 @@ def unconfirmed(row: Row) -> bool:
             or "timer_mismatch" in flags)
 
 
+# The statuses ab_compare.ACCURACY_FAIL rejects, read from the `accuracy` cell of the
+# CSV. Kept here (instead of importing ab_compare) so this script still works on a CSV
+# alone; test_rlc_report.py checks the two stay in step.
+ACCURACY_FAIL = ("fail", "timeout", "error")
+
+
+def accuracy_failed(row: Row) -> bool:
+    """A row whose op a side's unit test now rejects.
+
+    Such an op keeps the rounds an earlier invocation recorded (ab_compare.py shows
+    them, and this report keeps its rows too), but its numbers describe the build the
+    test rejected: a saving computed from them is not a saving of the current compiler.
+    Empty (no --accuracy-gate) and `no_test` are *not* failures — the gate never ran, or
+    had nothing to run, and the A/B stands as measured.
+
+    ab_compare.py --csv also writes `accuracy_failed` into `flags`, so a CSV whose
+    `accuracy` column was dropped still marks them (as with `unconfirmed`)."""
+    if "accuracy_failed" in row.flags.split(";"):
+        return True
+    return any(part.split(":", 1)[1] in ACCURACY_FAIL
+               for part in row.accuracy.split(",") if ":" in part)
+
+
+def excluded(row: Row, include_unconfirmed: bool = False,
+             include_accuracy_failed: bool = False) -> bool:
+    """Whether the gain/loss and saving/cost summaries leave this row out."""
+    return ((not include_unconfirmed and unconfirmed(row))
+            or (not include_accuracy_failed and accuracy_failed(row)))
+
+
+def counted_tail(rows: List[Row], include_unconfirmed: bool,
+                 include_accuracy_failed: bool) -> str:
+    """How the summaries treated this kind of row: all of them, none, or — when a row
+    carries both marks and only one switch is on — some.
+
+    Read off `excluded()`, the single place that decides it. Asking the two switches
+    separately is what let a note say "仍计入汇总" for a row the other reason still
+    kept out: with `accuracy=a:pass,b:fail` and `confirm=insufficient_rounds` on the
+    same row, `--include-accuracy-failed` alone counts nothing."""
+    dropped = sum(1 for r in rows
+                  if excluded(r, include_unconfirmed, include_accuracy_failed))
+    total = len(rows)
+    if not dropped:
+        return f"{total} 行，仍计入汇总"
+    if dropped == total:
+        return f"{total} 行，未计入汇总"
+    return f"{total} 行，其中 {dropped} 行未计入汇总"
+
+
 def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
-              notes: Dict[str, str], label: str, dropping: bool = True) -> List[str]:
+              notes: Dict[str, str], label: str, include_unconfirmed: bool = False,
+              include_accuracy_failed: bool = False, tell_accuracy: bool = True) -> List[str]:
     """The warnings a set of result rows carries: do_bench timing with its reason and how
     many of the rows it covers, a timer that differs between the two sides of a round,
     whatever the recheck settled (mixed clocks, too few rounds, or not reproduced — one
@@ -322,9 +390,12 @@ def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
     They stay apart on purpose: a mismatched main round makes that row's gap
     uncomparable, a refused recheck only means the main-round verdict was never
     confirmed, and not_reproduced is the opposite of both — the verdict was tested on
-    fresh rounds and did not hold. `dropping` says what the summaries did with those rows
-    (they are excluded by default), so every note states whether its numbers contain
-    them, and how many.
+    fresh rounds and did not hold. `include_unconfirmed` / `include_accuracy_failed` are
+    the two switches of the summaries, and every note derives its "counted / left out"
+    tail from `excluded()` over its own rows (`counted_tail`): a row can carry both marks,
+    so what one switch alone would do is not what happened to that row.
+    `tell_accuracy` turns the accuracy note off where it would only repeat what the op's
+    note already said (the per-group calls).
 
     The do_bench note is a table-level warning, not a per-row fallback count.
     ab_compare.nocg_tables() decides per (op_name, dtype) table: one fallback marker
@@ -336,10 +407,20 @@ def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
     markers carry no per-shape identity to compute one from.
 
     Both the dtype group and the op call this with the rows they own — the op with
-    all of them — so a warning that only a row of a column-less dtype (float32, ...)
+    all of them — so a warning that only a row of a column-less dtype (int8, ...)
     carries still reaches the op's note."""
     flags = {f for r in rows for f in r.flags.split(";") if f}
     out = []
+    # First: a row whose op a side's unit test rejects has numbers that describe the
+    # build the test rejected, so its "gain" may be a numerical regression. Say that
+    # before the timing caveats, and say whether it was counted.
+    failed = [r for r in rows if accuracy_failed(r)]
+    if failed and tell_accuracy:
+        cells = "；".join(sorted({r.accuracy for r in failed if r.accuracy}))
+        # A CSV trimmed down to `flags` still marks the row (accuracy_failed) but has no
+        # cell to quote: say the same thing without the "a:pass,b:fail" prefix.
+        out.append(f"精度失败（{cells + '；' if cells else ''}历史性能仅供参考，"
+                   f"{counted_tail(failed, include_unconfirmed, include_accuracy_failed)}）")
     if "do_bench" in flags:
         bench = [r for r in rows if "do_bench" in r.flags.split(";")]
         why = sorted({(reasons or {}).get(r.run, "") for r in bench} - {""})
@@ -347,15 +428,14 @@ def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
                    + (f"；{'；'.join(why)}" if why else "") + "）")
     mismatched = [r for r in rows if "timer_mismatch" in r.flags.split(";")]
     if mismatched:
-        tail = (f"未计入收益/损失汇总，{len(mismatched)} 行" if dropping else "仍计入汇总")
-        out.append(f"A/B 计时口径不一致，性能差异不可直接比较（{tail}）")
+        out.append("A/B 计时口径不一致，性能差异不可直接比较（"
+                   f"{counted_tail(mismatched, include_unconfirmed, include_accuracy_failed)}）")
     for reason, title in CONFIRM_REASONS.items():
         hits = [r for r in rows if r.confirm == reason]
         if not hits:
             continue
-        tail = (f"{len(hits)} 行，未计入汇总" if dropping
-                else f"{len(hits)} 行，仍计入汇总")
-        out.append(f"{title}（{tail}）")
+        out.append(f"{title}（"
+                   f"{counted_tail(hits, include_unconfirmed, include_accuracy_failed)}）")
     # Rows marked unconfirmed but carrying no reason this report can name: a --csv whose
     # `confirm` column was dropped (only `flags=unconfirmed` survives), or a state a newer
     # ab_compare.py writes. They are excluded all the same, so say so instead of leaving
@@ -364,9 +444,8 @@ def row_notes(rows: List[Row], reasons: Optional[Dict[str, str]],
                if unconfirmed(r) and r.confirm not in CONFIRM_REASONS
                and "timer_mismatch" not in r.flags.split(";")]
     if generic:
-        tail = (f"{len(generic)} 行，未计入汇总" if dropping
-                else f"{len(generic)} 行，仍计入汇总")
-        out.append(f"结果未确认（{tail}）")
+        out.append(f"结果未确认（"
+                   f"{counted_tail(generic, include_unconfirmed, include_accuracy_failed)}）")
     if "replay_fallback" in flags:
         out.append("replay 回退，config 不一致")
     if rows and all(r.gate == "unchanged" for r in rows) and \
@@ -382,11 +461,15 @@ def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]
                 gate_dir: Optional[Path], notes: Dict[str, str], label: str,
                 group: str, reasons: Optional[Dict[str, str]] = None,
                 kernels: Optional[Dict[Tuple[str, str, str, int], List[str]]] = None,
-                include_unconfirmed: bool = False) -> dict:
+                include_unconfirmed: bool = False,
+                include_accuracy_failed: bool = False) -> dict:
     # Rows with a timer mismatch stay in `rows` (the table still counts them and warns
     # about them) but are left out of the gain/loss ranges: their gap compares two clocks,
-    # or its verdict was never confirmed by the recheck.
-    counted = rows if include_unconfirmed else [r for r in rows if not unconfirmed(r)]
+    # or its verdict was never confirmed by the recheck. Rows whose op a side's unit test
+    # rejects are left out for a stronger reason: their numbers belong to the build the
+    # test rejected, so a "gain" there is not a gain of the current compiler.
+    counted = [r for r in rows
+               if not excluded(r, include_unconfirmed, include_accuracy_failed)]
     gains = [r for r in counted if r.gap > 0]
     losses = [r for r in counted if r.gap < 0]
     total = len(rows)
@@ -400,7 +483,9 @@ def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]
     cvt_before = cvt_after = None
     if hashes:
         cvt_before, cvt_after = cvt_counts(gate_dir, hashes)
-    note = row_notes(rows, reasons, notes, label, dropping=not include_unconfirmed)
+    note = row_notes(rows, reasons, notes, label,
+                     include_unconfirmed=include_unconfirmed,
+                     include_accuracy_failed=include_accuracy_failed)
     return {
         "rows": total,
         "dtypes": sorted({r.dtype for r in rows}),
@@ -424,11 +509,11 @@ def build_groups(rows: List[Row]) -> List[Group]:
 
 
 def ungrouped_note(rows: List[Row]) -> str:
-    """Note for the rows whose dtype the table has no column for (float32, ...).
+    """Note for the rows whose dtype the table has no column for (int8, ...).
 
     They are not shown per dtype, but they are neither dropped nor hidden: the op
     list and its saving/cost include them, and this note says which dtypes carry
-    them, so a table without a float32 column does not read as "float32 is fine"."""
+    them, so a table without an int8 column does not read as "int8 is fine"."""
     counts = Counter(r.dtype for r in rows if dtype_group(r.dtype) is None)
     if not counts:
         return ""
@@ -441,11 +526,12 @@ def op_entry(label: str, rows: List[Row], groups: Dict[str, List[Row]],
              gate: Dict[Tuple[str, str, str, int], List[str]],
              gate_dir: Optional[Path], notes: Dict[str, str], reasons: Dict[str, str],
              kernels: Dict[Tuple[str, str, str, int], List[str]],
-             include_unconfirmed: bool = False) -> dict:
+             include_unconfirmed: bool = False,
+             include_accuracy_failed: bool = False) -> dict:
     """One table row: the per-dtype statistics of the op, plus its saving/cost and
     its warnings over every row it has — rows of a dtype without a column included.
 
-    So an op that only ran float32 still appears, its change is not lost, and a
+    So an op that only ran int8 still appears, its change is not lost, and a
     warning only that dtype carries (do_bench timing, a replay/config mismatch, a
     manual note) still reaches the table: those rows are in no group's note. A
     warning only *one dtype's* rows produce is kept too, prefixed with that dtype
@@ -453,17 +539,26 @@ def op_entry(label: str, rows: List[Row], groups: Dict[str, List[Row]],
     kernels" stops being true for the op as soon as another dtype changed.
 
     The gain/loss and saving/cost figures skip rows with a timer mismatch unless
-    include_unconfirmed is set, and the note says how many rows were left out."""
+    include_unconfirmed is set, and rows whose op a side's unit test rejects unless
+    include_accuracy_failed is set; the note says how many rows were left out."""
     stats = {group: summarizing(rs, gate, gate_dir, notes, label, group, reasons, kernels,
-                                include_unconfirmed=include_unconfirmed)
+                                include_unconfirmed=include_unconfirmed,
+                                include_accuracy_failed=include_accuracy_failed)
              for group, rs in groups.items()}
-    counted = rows if include_unconfirmed else [r for r in rows if not unconfirmed(r)]
+    counted = [r for r in rows
+               if not excluded(r, include_unconfirmed, include_accuracy_failed)]
     saving = max((r.a_ms - r.b_ms for r in counted), default=0.0)
     cost = max((r.b_ms - r.a_ms for r in counted), default=0.0)
-    merged = row_notes(rows, reasons, notes, label, dropping=not include_unconfirmed)
+    merged = row_notes(rows, reasons, notes, label,
+                       include_unconfirmed=include_unconfirmed,
+                       include_accuracy_failed=include_accuracy_failed)
     for group, group_rows in groups.items():
+        # The op's note already says a rejected op's rows are out of the summaries, so
+        # the per-group copy would repeat it once per dtype with nothing new to say.
         for text in row_notes(group_rows, reasons, notes, label,
-                              dropping=not include_unconfirmed):
+                              include_unconfirmed=include_unconfirmed,
+                              include_accuracy_failed=include_accuracy_failed,
+                              tell_accuracy=False):
             labelled = f"{group} {text}"
             if text not in merged and labelled not in merged:
                 merged.append(labelled)
@@ -528,7 +623,37 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
     head_fill = PatternFill("solid", fgColor="D9E2F3")
     group_fill = PatternFill("solid", fgColor="EDEDED")
 
-    ncols = 27
+    # The layout follows DTYPE_GROUPS: adding a dtype group widens the sheet without
+    # touching the column positions below.
+    def typed(group: str) -> bool:
+        return group in TYPED_GROUPS
+
+    def width(group: str) -> int:
+        return 8 if typed(group) else 7
+
+    heads = [(1, 1, "#"), (2, 2, "算子")]
+    subs: List[Tuple[int, int, str]] = []
+    leaves = ["#", "算子"]
+    widths = [5, 26]
+    col = 3
+    for group, _ in DTYPE_GROUPS:
+        heads.append((col, col + width(group) - 1, group))
+        if typed(group):
+            subs.append((col, col, "类型"))
+            leaves.append("类型")
+            widths.append(16)
+            col += 1
+        subs += [(col, col + 2, "收益"), (col + 3, col + 5, "退化"), (col + 6, col + 6, "cvt")]
+        leaves += ["最弱", "最强", "shape", "最轻", "最重", "shape", "cvt"]
+        widths += [9, 9, 7, 9, 9, 7, 7]
+        col += 7
+    heads += [(col, col + 1, "最大绝对变化"), (col + 2, col + 2, "备注")]
+    subs += [(col, col, "节省"), (col + 1, col + 1, "多出")]
+    leaves += ["节省", "多出", "备注"]
+    widths += [10, 10, 34]
+    ncols = len(widths)
+    note_col = ncols
+
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
     ws.cell(1, 1, title).font = Font(bold=True, size=14)
     ws.cell(1, 1).alignment = center
@@ -536,32 +661,18 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
     ws.cell(2, 1, env).alignment = center
 
     # header: row 4 groups, row 5 sub-groups, row 6 leaf columns
-    heads = [
-        (1, 1, "#"), (2, 2, "算子"),
-        (3, 9, "bf16"), (10, 16, "fp16"), (17, 24, "fp8 / complex64"),
-        (25, 26, "最大绝对变化"), (27, 27, "备注"),
-    ]
     for c1, c2, text in heads:
         ws.merge_cells(start_row=4, start_column=c1, end_row=4, end_column=c2)
         cell = ws.cell(4, c1, text)
         cell.font = Font(bold=True)
         cell.alignment = center
         cell.fill = group_fill
-    subs = [(3, 5, "收益"), (6, 8, "退化"), (9, 9, "cvt"),
-            (10, 12, "收益"), (13, 15, "退化"), (16, 16, "cvt"),
-            (17, 17, "类型"), (18, 20, "收益"), (21, 23, "退化"), (24, 24, "cvt"),
-            (25, 25, "节省"), (26, 26, "多出")]
     for c1, c2, text in subs:
         ws.merge_cells(start_row=5, start_column=c1, end_row=5, end_column=c2)
         cell = ws.cell(5, c1, text)
         cell.font = Font(bold=True)
         cell.alignment = center
         cell.fill = head_fill
-    leaves = ["#", "算子",
-              "最弱", "最强", "shape", "最轻", "最重", "shape", "cvt",
-              "最弱", "最强", "shape", "最轻", "最重", "shape", "cvt",
-              "类型", "最弱", "最强", "shape", "最轻", "最重", "shape", "cvt",
-              "节省", "多出", "备注"]
     for i, text in enumerate(leaves, 1):
         cell = ws.cell(6, i, text)
         cell.font = Font(bold=True)
@@ -573,12 +684,12 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
 
     for i, r in enumerate(rows, 1):
         out = [i, r["name"]]
-        for group in ("bf16", "fp16", "fp8 / complex64"):
+        for group, _ in DTYPE_GROUPS:
             g = r["groups"].get(group)
             if g is None:
-                out += [""] * (8 if group == "fp8 / complex64" else 7)
+                out += [""] * width(group)
                 continue
-            if group == "fp8 / complex64":
+            if typed(group):
                 out.append(fp8_type(g["dtypes"]))
             out += [fmt_pct(g["gain"][0]) if g["gain"][0] is not None else "",
                     fmt_pct(g["gain"][1]) if g["gain"][1] is not None else "",
@@ -592,12 +703,10 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
         for col, value in enumerate(out, 1):
             cell = ws.cell(6 + i, col, value)
             cell.border = border
-            cell.alignment = left if col in (2, 27) else center
+            cell.alignment = left if col in (2, note_col) else center
 
-    widths = [5, 26, 9, 9, 7, 9, 9, 7, 7, 9, 9, 7, 9, 9, 7, 7,
-              16, 9, 9, 7, 9, 9, 7, 7, 10, 10, 34]
-    for i, width in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = width
+    for i, width_ in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width_
     ws.freeze_panes = "A7"
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
@@ -626,6 +735,11 @@ def main() -> None:
                         "with plain do_bench, or a recheck that could not confirm) in the "
                         "gain/loss and saving/cost summaries; by default they are excluded "
                         "and the note says how many")
+    p.add_argument("--include-accuracy-failed", action="store_true",
+                   help="count the rows of an op a side's unit test rejects (--accuracy-gate "
+                        "recorded a fail/timeout/error) in the gain/loss and saving/cost "
+                        "summaries; by default they are excluded -- those rounds describe the "
+                        "build the test rejected -- and the note says so")
     args = p.parse_args()
 
     rows = read_ab_csv(args.csv)
@@ -660,7 +774,8 @@ def main() -> None:
         out.append({"name": display_name(label, op_names, sources, op_files),
                     **op_entry(label, by_label[label], grouped[label], gate, args.gate,
                                notes, reasons, kernels,
-                               include_unconfirmed=args.include_unconfirmed)})
+                               include_unconfirmed=args.include_unconfirmed,
+                               include_accuracy_failed=args.include_accuracy_failed)})
 
     write_xlsx(args.out, out, args.title, args.env)
     print(f"{LOG} {len(out)} ops, {len(rows)} rows -> {args.out}", flush=True)

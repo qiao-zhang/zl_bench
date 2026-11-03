@@ -18,9 +18,12 @@ false-positive rate of the rule. Only rows with a changed (or unknown) kernel co
 as results. --rounds restricts the analysis to a range of rounds.
 
 With ab_run.py --accuracy-gate, ab.json also records each side's unit-test outcome per
-op (tests/test_<op_file>.py::test_<op>, or no_test when the repo has no such test). The
-report ends with that section and --csv carries an `accuracy` column; ops a side did
-not pass have no A/B rounds, so they appear only there.
+op (tests/test_<op_file>.py::test_<op>, a wider match or an --accuracy-map entry, or
+no_test when the gate could locate no test). The report ends with that section and
+--csv carries an `accuracy` column. An op a side fails gets no new rounds, and the
+rounds an earlier invocation recorded are shown in their own line rather than counted:
+they describe the build that test rejected. no_test is not a failure -- the gate had
+nothing to run, and the A/B stands.
 
 Independent recheck of weak results, on fresh rounds:
 
@@ -47,7 +50,9 @@ p < --confirm-alpha (0.05). A recheck is judged in this order: first whether its
 rounds were timed consistently (`timer_mismatch`), then whether it has at least three
 rounds (`insufficient_rounds`), and only then the verdict — neither of the first two
 confirms or merges anything, and --recheck-list keeps `insufficient_rounds` rows so
-`ab_run.py --add-rounds` can extend them.
+`ab_run.py --add-rounds` can extend them — while dropping the ops the accuracy gate
+rejects, which more rounds cannot fix. `--csv` marks those rows `accuracy_failed` in
+`flags` as well, so the column alone says a row is not usable.
 Confirmed rows report the gap over all rounds; rows that are
 not reproduced become undecided.
 
@@ -76,7 +81,7 @@ import statistics
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Collection, Dict, List, NamedTuple, Optional, Tuple
 
 import ab_stats
 from batch_summary import OPERATOR_HEADER_RE, parse_run_log
@@ -441,14 +446,20 @@ def is_weak(r: Result, weak_gap: float) -> bool:
 
 
 def recheck_ops(results: List[Result], labels: Dict[str, str],
-                weak_gap: float) -> Tuple[List[str], int]:
+                weak_gap: float, skip_runs: Collection[str] = ()) -> Tuple[List[str], int]:
     """(ops, weak rows) a fresh-round recheck should target.
 
     Every weak row of a changed (or unknown) kernel, except the ones more rounds cannot
     fix: insufficient_rounds belongs here — more rounds is exactly what fixes it — while
-    timer_mismatch and not_reproduced do not improve with more rounds, so both stay out."""
+    timer_mismatch and not_reproduced do not improve with more rounds, so both stay out.
+
+    skip_runs drops the ops a side's unit test rejects (ab_compare.accuracy_failed_runs).
+    More rounds cannot fix those either, and ab_run.py would gate the op out again
+    before measuring it -- a list made only of them ends the recheck with "every
+    selected op failed the accuracy gate" instead of producing samples."""
     weak = [r for r in results
-            if r.gate != "unchanged" and r.confirm in ("", "insufficient_rounds")
+            if r.row.run not in skip_runs and r.gate != "unchanged"
+            and r.confirm in ("", "insufficient_rounds")
             and is_weak(r, weak_gap)]
     return sorted({labels.get(r.row.run, r.row.run) for r in weak}), len(weak)
 
@@ -531,6 +542,36 @@ def accuracy_of(manifest: dict, run: str) -> str:
     return ",".join(out)
 
 
+# A side the gate rejected: its samples came from a build the unit test does not
+# accept, so a gap measured from them says nothing about the current compiler.
+ACCURACY_FAIL = ("fail", "timeout", "error")
+
+
+def accuracy_failed(cell: str) -> bool:
+    """Whether an `accuracy` cell (`a:pass,b:fail`) records a side the gate rejected.
+
+    Empty (no --accuracy-gate) and no_test are not failures: the gate never ran, or
+    had nothing to run, and the A/B stands as measured."""
+    return any(part.split(":", 1)[1] in ACCURACY_FAIL
+               for part in cell.split(",") if ":" in part)
+
+
+def accuracy_failed_runs(manifest: dict) -> Dict[str, str]:
+    """{run: its `accuracy` cell} for the ops a side did not pass.
+
+    ab_run.py --accuracy-gate keeps such an op out of the rounds it starts, but the
+    rounds an earlier invocation recorded stay on disk. Their medians still describe
+    the build the test rejected, so the report shows them -- and keeps them out of
+    the counts, or the table would call a numerical regression a speedup."""
+    sides = accuracy_sides(manifest)
+    out = {}
+    for run in sorted({run for rows in sides.values() for run in rows}):
+        cell = accuracy_of(manifest, run)
+        if accuracy_failed(cell):
+            out[run] = cell
+    return out
+
+
 def report_accuracy(manifest: dict, labels: Dict[str, str]) -> None:
     """The accuracy gate's outcome: it is what decides whether an op has an A/B at
     all, so a report without it would hide why ops are missing."""
@@ -541,7 +582,10 @@ def report_accuracy(manifest: dict, labels: Dict[str, str]) -> None:
         return
     runs = sorted({run for rows in sides.values() for run in rows})
     tests_dir = acc.get("tests_dir", "tests")
+    test_map = acc.get("map") or {}
     print(f"\n== accuracy gate ({tests_dir}/ unit test per side): {len(runs)} ops checked")
+    if test_map:
+        print(f"   map: {test_map.get('entries', 0)} op(s) named in {test_map.get('file', '?')}")
     for side in ("a", "b"):
         rows = sides.get(side) or {}
         if not rows:
@@ -551,8 +595,9 @@ def report_accuracy(manifest: dict, labels: Dict[str, str]) -> None:
     unverified = sum(1 for rows in sides.values() for row in rows.values()
                      if (row or {}).get("status") == "no_test")
     if unverified:
-        print(f"   no_test: {unverified} op-sides have no unit test upstream, "
-              "their A/B result is not backed by an accuracy check")
+        print(f"   no_test: {unverified} op-sides were left unverified (no test the gate "
+              "could locate, or nothing in it ran), so their A/B result is not backed by "
+              "an accuracy check; ab_run.py --accuracy-map names a test for one")
     if skipped:
         print(f"   skipped A/B (a side did not pass): {len(skipped)}")
         for run, why in sorted(skipped.items())[:20]:
@@ -569,6 +614,12 @@ def report(results: List[Result], labels: Dict[str, str], manifest: dict,
         what = " ".join(([f"PYTHONPATH={cfg['pythonpath']}"] if cfg.get("pythonpath") else [])
                         + [f"{k}={v}" for k, v in (cfg.get("env") or {}).items()])
         print(f"{s.upper()} = {cfg.get('name', s.upper())}: {what or '(caller environment)'}")
+    # An op a side no longer passes keeps the rounds an earlier invocation recorded:
+    # they are shown below in their own line, but never counted -- their gap compares
+    # builds the unit test has since rejected.
+    failed = accuracy_failed_runs(manifest)
+    stale = [r for r in results if r.row.run in failed]
+    results = [r for r in results if r.row.run not in failed]
     gated = any(r.gate for r in results)
     tested = [r for r in results if not gated or r.gate != "unchanged"]
     controls = [r for r in results if gated and r.gate == "unchanged"]
@@ -613,6 +664,14 @@ def report(results: List[Result], labels: Dict[str, str], manifest: dict,
     what = "rows with a changed kernel" if gated else "rows"
     print(f"\n== {what}: {len(tested)}; faster {v['faster']}, slower {v['slower']}, "
           f"same {v['same']}, undecided {v['undecided']}")
+    if stale:
+        runs = sorted({r.row.run for r in stale})
+        print(f"   accuracy failed (a side the gate rejected): {len(stale)} rows in "
+              f"{len(runs)} ops not counted above -- historical performance only")
+        for run in runs[:10]:
+            print(f"     {labels.get(run, run)}  {failed[run]}")
+        if len(runs) > 10:
+            print(f"     ... {len(runs) - 10} more")
     modes = Counter(timer_mode(r.row) for r in tested)
     if modes.get("mixed") or modes.get("do_bench"):
         print(f"   timing: graph {modes.get('graph', 0)}, do_bench {modes.get('do_bench', 0)}, "
@@ -666,13 +725,19 @@ def write_csv(path: Path, results: List[Result], labels: Dict[str, str],
         w = csv.writer(f)
         w.writerow(fields)
         for r in results:
+            accuracy = accuracy_of(manifest, r.row.run)
+            # `accuracy_failed` belongs here, next to the other "how to read this row"
+            # markers: verdict and gap_confirmed keep their meaning (timing and recheck),
+            # so a consumer that only keeps `flags` still cannot mistake a rejected op's
+            # row for a usable result.
             flags = ";".join(x for x, on in (("do_bench", r.row.nocg),
                                              ("timer_mismatch", timer_mismatch(r.row)),
                                              ("unconfirmed",
                                               row_unconfirmed(r.row, r.confirm)),
+                                             ("accuracy_failed", accuracy_failed(accuracy)),
                                              ("replay_fallback", r.row.fallback)) if on)
             w.writerow([labels.get(r.row.run, r.row.run), r.row.run, r.row.op_name, r.row.dtype,
-                        r.row.row, r.row.size, r.gate, accuracy_of(manifest, r.row.run),
+                        r.row.row, r.row.size, r.gate, accuracy,
                         r.stats.n_a, f"{r.stats.median_a:.6g}",
                         f"{r.stats.median_b:.6g}", f"{r.stats.gap:.6f}",
                         "" if math.isnan(r.stats.p) else f"{r.stats.p:.4g}", r.stats.verdict, flags,
@@ -757,7 +822,8 @@ def main() -> None:
         write_csv(args.csv, results, labels, manifest)
         print(f"== per-row statistics: {args.csv}")
     if args.recheck_list:
-        ops, rows = recheck_ops(results, labels, args.weak_gap)
+        ops, rows = recheck_ops(results, labels, args.weak_gap,
+                                skip_runs=accuracy_failed_runs(manifest))
         args.recheck_list.write_text("".join(f"{op}\n" for op in ops))
         print(f"== {rows} weak rows in {len(ops)} ops: {args.recheck_list}")
 

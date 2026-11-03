@@ -107,9 +107,10 @@ def _case(repo="main", op="softmax", op_file=None):
     return run_batch.Case(repo, op, op_file or op, op)
 
 
-def _gate_args(tmp_path):
+def _gate_args(tmp_path, mapping=None, map_file=None):
     return argparse.Namespace(
         out=tmp_path / "ab", accuracy_timeout=60, use_flagtune=0,
+        accuracy_map=mapping or {}, accuracy_map_file=map_file,
         sides={"a": {"name": "A", "pythonpath": "", "env": {}},
                "b": {"name": "B", "pythonpath": "", "env": {}}})
 
@@ -207,6 +208,119 @@ def test_test_target_refuses_a_path_outside_tests(monkeypatch, tmp_path):
     assert ab_run.test_target(_case(op="escape", op_file="../test_escape")) is None
 
 
+def test_test_target_falls_back_to_a_test_function_that_contains_the_op_name(monkeypatch,
+                                                                            tmp_path):
+    """Upstream often names the test after what it checks, not after the op:
+    `chunk_kda` lives in `test_chunk_kda_matches_torch_reference`. Without the
+    fallback such an op would read no_test although its test is right there."""
+    root = _checkout(tmp_path, "vllm")
+    (root / "tests" / "test_FLA").mkdir()
+    (root / "tests" / "test_FLA" / "test_chunk_kda.py").write_text(
+        "def test_chunk_kda_matches_torch_reference():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "vllm", root)
+    assert ab_run.test_target(_case(repo="vllm", op="chunk_kda",
+                                    op_file="FLA/test_chunk_kda")) \
+        == "tests/test_FLA/test_chunk_kda.py::test_chunk_kda_matches_torch_reference"
+
+
+def test_test_target_prefers_the_exact_name(monkeypatch, tmp_path):
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "def test_softmax_extended():\n    pass\n"
+        "def test_softmax():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax"
+
+
+def test_test_target_takes_every_containing_function(monkeypatch, tmp_path):
+    """A file of several named cases is the op's whole test: all of them gate it."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_kda.py").write_text(
+        "def test_kda_gate():\n    pass\n"
+        "def test_kda_state():\n    pass\n"
+        "def test_other():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case(op="kda")) == (
+        "tests/test_kda.py::test_kda_gate tests/test_kda.py::test_kda_state")
+
+
+# ---------------- --accuracy-map ----------------
+
+def _map_file(tmp_path, text):
+    path = tmp_path / "accuracy_map.txt"
+    path.write_text(text)
+    return path
+
+
+def test_accuracy_map_beats_the_automatic_lookup(monkeypatch, tmp_path):
+    """The map names the test the automatic lookup cannot find."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text("def test_softmax():\n    pass\n")
+    (root / "tests" / "test_other.py").write_text("def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    mapping = ab_run.load_accuracy_map(
+        _map_file(tmp_path, "# the accuracy half of the op\n"
+                             "main:softmax tests/test_other.py::test_softmax_accuracy\n"))
+    assert ab_run.test_target(_case(), mapping) == "tests/test_other.py::test_softmax_accuracy"
+
+
+def test_accuracy_map_entry_without_op_file_covers_the_op(monkeypatch, tmp_path):
+    """`vllm:chunk_kda` is enough when the op has one benchmark file: the entry is
+    keyed with an empty op_file and matched as the fallback."""
+    root = _checkout(tmp_path, "vllm")
+    (root / "tests" / "test_FLA").mkdir()
+    (root / "tests" / "test_FLA" / "test_chunk_kda.py").write_text(
+        "def test_kda_ref():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "vllm", root)
+    mapping = ab_run.load_accuracy_map(
+        _map_file(tmp_path, "vllm:chunk_kda tests/test_FLA/test_chunk_kda.py::test_kda_ref\n"))
+    assert ab_run.test_target(_case(repo="vllm", op="chunk_kda", op_file="FLA/test_chunk_kda"),
+                              mapping) == "tests/test_FLA/test_chunk_kda.py::test_kda_ref"
+
+
+def test_accuracy_map_keeps_several_targets_and_a_whole_file(monkeypatch, tmp_path):
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_abs.py").write_text("def test_abs_a():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    mapping = ab_run.load_accuracy_map(
+        _map_file(tmp_path, "main:abs tests/test_abs.py tests/test_abs.py::test_abs_a\n"))
+    assert ab_run.test_target(_case(op="abs"), mapping) \
+        == "tests/test_abs.py tests/test_abs.py::test_abs_a"
+
+
+def test_accuracy_map_canonicalises_the_target_path(monkeypatch, tmp_path):
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_abs.py").write_text("def test_abs_a():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    mapping = ab_run.load_accuracy_map(_map_file(tmp_path, "main:abs ./tests/test_abs.py::test_abs_a\n"))
+    assert mapping[("main", "abs", "")] == "tests/test_abs.py::test_abs_a"
+
+
+@pytest.mark.parametrize("text,message", [
+    ("main:abs\n", "expected"),
+    ("nowhere:abs tests/test_abs.py\n", "unknown repo"),
+    ("main:abs tests/test_nope.py::test_abs\n", "no such file"),
+    ("main:abs other/test_abs.py::test_abs\n", "under tests/"),
+    ("main:abs tests/test_abs.py::test_abs\nmain:abs tests/test_abs.py::test_abs\n",
+     "mapped twice"),
+    ("# only a comment\n", "names no op"),
+])
+def test_load_accuracy_map_refuses_a_bad_line(monkeypatch, tmp_path, text, message, capsys):
+    """A mistyped map must stop the run at startup, not resurface as no_test after
+    hours of benchmarking."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_abs.py").write_text("def test_abs():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    with pytest.raises(SystemExit) as exc:
+        ab_run.load_accuracy_map(_map_file(tmp_path, text))
+    assert message in f"{exc.value} {capsys.readouterr().err}"
+
+
+def test_load_accuracy_map_needs_the_file(tmp_path):
+    with pytest.raises(SystemExit, match="no accuracy map"):
+        ab_run.load_accuracy_map(tmp_path / "missing.txt")
+
+
 @pytest.mark.parametrize("rc,timed_out,text,status", [
     (0, False, "1 passed in 0.01s", ab_run.GATE_PASS),
     (0, False, "2 passed, 1 skipped in 0.01s", ab_run.GATE_PASS),
@@ -275,6 +389,56 @@ def test_run_accuracy_records_the_side_and_the_log(monkeypatch, tmp_path):
     assert (args.out / row["log"]).is_file()
 
 
+def test_run_accuracy_passes_every_target_to_pytest(monkeypatch, tmp_path):
+    """An op whose test file holds several named cases gets all of them in one
+    pytest call, so the gate covers the whole file."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_kda.py").write_text(
+        "def test_kda_gate():\n    pass\ndef test_kda_state():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    seen = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, cwd=None, env=None, stdout=None, stderr=None, start_new_session=False):
+        seen.update(cmd=cmd)
+        stdout.write("2 passed in 0.1s\n")
+        return FakeProc()
+
+    monkeypatch.setattr(ab_run.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ab_run.run_batch, "_wait", lambda proc, timeout: (0, False))
+    row = ab_run.run_accuracy(_case(op="kda"), "a", _gate_args(tmp_path), "0")
+    assert seen["cmd"][-2:] == ["tests/test_kda.py::test_kda_gate",
+                               "tests/test_kda.py::test_kda_state"]
+    assert row["status"] == ab_run.GATE_PASS
+    assert row["target"] == ("tests/test_kda.py::test_kda_gate "
+                             "tests/test_kda.py::test_kda_state")
+
+
+def test_run_accuracy_uses_the_maps_target(monkeypatch, tmp_path):
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_kda.py").write_text("def test_kda_ref():\n    pass\n")
+    (root / "tests" / "test_kda_accuracy.py").write_text("def test_kda_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    seen = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, cwd=None, env=None, stdout=None, stderr=None, start_new_session=False):
+        seen.update(cmd=cmd)
+        stdout.write("1 passed in 0.1s\n")
+        return FakeProc()
+
+    mapping = {("main", "kda", "kda"): "tests/test_kda_accuracy.py::test_kda_accuracy"}
+    monkeypatch.setattr(ab_run.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ab_run.run_batch, "_wait", lambda proc, timeout: (0, False))
+    row = ab_run.run_accuracy(_case(op="kda"), "a", _gate_args(tmp_path, mapping=mapping), "0")
+    assert seen["cmd"][-1] == "tests/test_kda_accuracy.py::test_kda_accuracy"
+    assert row["target"] == "tests/test_kda_accuracy.py::test_kda_accuracy"
+
+
 def test_accuracy_gate_drops_an_op_a_side_fails(monkeypatch, tmp_path):
     args = _gate_args(tmp_path)
     args.out.mkdir()
@@ -296,20 +460,124 @@ def test_accuracy_gate_drops_an_op_a_side_fails(monkeypatch, tmp_path):
 
 
 def test_accuracy_gate_reuses_recorded_results(monkeypatch, tmp_path):
-    """Resuming and --add-rounds must not rerun a gate that already passed."""
+    """Resuming and --add-rounds must not rerun a gate that already passed the test
+    this run would execute."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text("def test_softmax():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
     args = _gate_args(tmp_path)
     args.out.mkdir()
     (args.out / "ab.json").write_text(json.dumps({
         "record": "rec",
-        "accuracy": {"sides": {"a": {"main/softmax": {"status": ab_run.GATE_PASS}},
-                               "b": {"main/softmax": {"status": ab_run.GATE_NO_TEST}}}}}))
+        "accuracy": {"sides": {side: {"main/softmax": {
+            "status": ab_run.GATE_PASS,
+            "target": "tests/test_softmax.py::test_softmax"}}
+            for side in ("a", "b")}}}))
     monkeypatch.setattr(ab_run, "run_accuracy",
                         lambda *a: pytest.fail("a recorded gate ran again"))
     kept, skipped = ab_run.accuracy_gate([_case()], args, ["0"])
     assert [c.op for c in kept] == ["softmax"] and skipped == {}
     data = json.loads((args.out / "ab.json").read_text())
     assert data["record"] == "rec"  # the manifest fields survive the rewrite
-    assert data["accuracy"]["sides"]["b"]["main/softmax"]["status"] == ab_run.GATE_NO_TEST
+    assert data["accuracy"]["sides"]["b"]["main/softmax"]["status"] == ab_run.GATE_PASS
+
+
+def test_accuracy_gate_reuses_a_recorded_no_test_without_a_target(monkeypatch, tmp_path):
+    """An op the repo has no test for keeps its recorded no_test: resuming does not
+    look again for a test that is still not there."""
+    args = _gate_args(tmp_path)
+    args.out.mkdir()
+    monkeypatch.setitem(ab_run.REPOS, "main", _checkout(tmp_path))  # no unit test at all
+    (args.out / "ab.json").write_text(json.dumps({
+        "record": "rec",
+        "accuracy": {"sides": {side: {"main/softmax": {"status": ab_run.GATE_NO_TEST}}
+                               for side in ("a", "b")}}}))
+    monkeypatch.setattr(ab_run, "run_accuracy",
+                        lambda *a: pytest.fail("a recorded gate ran again"))
+    kept, skipped = ab_run.accuracy_gate([_case()], args, ["0"])
+    assert [c.op for c in kept] == ["softmax"] and skipped == {}
+    assert json.loads((args.out / "ab.json").read_text())["record"] == "rec"
+
+
+def test_accuracy_gate_reruns_a_pass_recorded_for_another_target(monkeypatch, tmp_path):
+    """A recorded pass says the test that ran beside it passed, not that any test
+    would: pointing --accuracy-map at a stricter test for the same op makes the
+    pass stale, so the gate runs again instead of waving the old pass through."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "def test_softmax():\n    pass\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    args = _gate_args(tmp_path, mapping={
+        ("main", "softmax", "softmax"): "tests/test_softmax.py::test_softmax_accuracy"},
+        map_file=tmp_path / "accuracy_map.txt")
+    args.out.mkdir()
+    (args.out / "ab.json").write_text(json.dumps({
+        "record": "rec",
+        "accuracy": {"sides": {side: {"main/softmax": {
+            "status": ab_run.GATE_PASS,
+            "target": "tests/test_softmax.py::test_softmax"}}
+            for side in ("a", "b")}}}))
+    seen = []
+    monkeypatch.setattr(ab_run, "run_accuracy",
+                        lambda case, side, a, gpu: seen.append(side) or {
+                            **_row(ab_run.GATE_PASS),
+                            "target": ab_run.test_target(case, a.accuracy_map)})
+    kept, skipped = ab_run.accuracy_gate([_case()], args, ["0"])
+    assert seen == ["a", "b"] and skipped == {}
+    data = json.loads((args.out / "ab.json").read_text())["accuracy"]
+    assert data["sides"]["a"]["main/softmax"]["target"] == \
+        "tests/test_softmax.py::test_softmax_accuracy"
+    assert data["sides"]["a"]["main/softmax"]["status"] == ab_run.GATE_PASS
+
+
+def test_accuracy_gate_reruns_a_pass_without_a_recorded_target(monkeypatch, tmp_path):
+    """An ab.json written before targets were recorded has a pass with no test
+    identity: it reruns once, and the rewritten row carries the target from then on."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text("def test_softmax():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    args = _gate_args(tmp_path)
+    args.out.mkdir()
+    (args.out / "ab.json").write_text(json.dumps({
+        "accuracy": {"sides": {side: {"main/softmax": {"status": ab_run.GATE_PASS}}
+                               for side in ("a", "b")}}}))
+    seen = []
+    monkeypatch.setattr(ab_run, "run_accuracy",
+                        lambda case, side, a, gpu: seen.append(side) or {
+                            **_row(ab_run.GATE_PASS),
+                            "target": ab_run.test_target(case, a.accuracy_map)})
+    ab_run.accuracy_gate([_case()], args, ["0"])
+    assert seen == ["a", "b"]
+    data = json.loads((args.out / "ab.json").read_text())["accuracy"]
+    assert data["sides"]["b"]["main/softmax"]["target"] == \
+        "tests/test_softmax.py::test_softmax"
+
+
+def test_accuracy_gate_reruns_a_recorded_no_test_a_map_now_locates(monkeypatch, tmp_path):
+    """A recorded no_test meant "nothing to run". Once --accuracy-map names a test for
+    that op the row is stale, so resuming the same --out runs the gate after all --
+    rather than keeping an unverified op forever."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text("def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    args = _gate_args(tmp_path, mapping={
+        ("main", "softmax", "softmax"): "tests/test_softmax.py::test_softmax_accuracy"},
+        map_file=tmp_path / "accuracy_map.txt")
+    args.out.mkdir()
+    (args.out / "ab.json").write_text(json.dumps({
+        "record": "rec",
+        "accuracy": {"sides": {side: {"main/softmax": {"status": ab_run.GATE_NO_TEST,
+                                                       "target": ""}}
+                               for side in ("a", "b")}}}))
+    seen = []
+    monkeypatch.setattr(ab_run, "run_accuracy",
+                        lambda case, side, a, gpu: seen.append(side) or _row(ab_run.GATE_PASS))
+    kept, skipped = ab_run.accuracy_gate([_case()], args, ["0"])
+    assert seen == ["a", "b"] and [c.op for c in kept] == ["softmax"] and skipped == {}
+    data = json.loads((args.out / "ab.json").read_text())["accuracy"]
+    assert data["sides"]["a"]["main/softmax"]["status"] == ab_run.GATE_PASS
+    assert data["map"] == {"file": str(tmp_path / "accuracy_map.txt"), "entries": 1}
 
 
 def test_main_measures_only_the_ops_that_pass_the_gate(monkeypatch, tmp_path):

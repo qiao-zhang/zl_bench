@@ -76,9 +76,9 @@ def test_resolve_expands_every_test_for_one_name(monkeypatch, tmp_path):
 
 
 def _row(label="main:kron@kron", dtype="torch.bfloat16", gap=0.5, a=0.05, b=0.02,
-         gate="changed", flags="", verdict="faster", row=0, confirm=""):
+         gate="changed", flags="", verdict="faster", row=0, confirm="", accuracy=""):
     return rlc_report.Row(label, "main/kron", "kron", dtype, row, gap, a, b,
-                          gate, flags, verdict, confirm)
+                          gate, flags, verdict, confirm, accuracy)
 
 
 def test_summarizing_splits_gain_and_loss_rows():
@@ -119,14 +119,15 @@ def test_row_notes_separate_a_mismatched_main_round_from_a_refused_recheck():
     rounds themselves are clean, so they must not be called uncomparable."""
     mismatched = [_row(flags="timer_mismatch", gap=0.2)]
     assert rlc_report.row_notes(mismatched, None, {}, "main:kron@kron") == [
-        "A/B 计时口径不一致，性能差异不可直接比较（未计入收益/损失汇总，1 行）"]
+        "A/B 计时口径不一致，性能差异不可直接比较（1 行，未计入汇总）"]
     refused = [_row(gap=0.2, confirm="timer_mismatch"),
                _row(row=1, gap=0.1, confirm="timer_mismatch")]
     assert rlc_report.row_notes(refused, None, {}, "main:kron@kron") == [
         "复测计时口径不一致，主轮次结论未确认（2 行，未计入汇总）"]
     # --include-unconfirmed: the note must say the numbers contain them after all
-    assert rlc_report.row_notes(mismatched, None, {}, "main:kron@kron", dropping=False) == [
-        "A/B 计时口径不一致，性能差异不可直接比较（仍计入汇总）"]
+    assert rlc_report.row_notes(mismatched, None, {}, "main:kron@kron",
+                                include_unconfirmed=True) == [
+        "A/B 计时口径不一致，性能差异不可直接比较（1 行，仍计入汇总）"]
 
 
 def test_summarizing_excludes_unconfirmed_rows_by_default():
@@ -139,8 +140,8 @@ def test_summarizing_excludes_unconfirmed_rows_by_default():
     assert stats["rows"] == 3                      # 仍计入行数（诊断展示）
     assert stats["gain"] == (0.3, 0.3, 1)          # 只有干净行进收益区间
     assert stats["loss"] == (None, None, 0)
-    assert "未计入收益/损失汇总，1 行" in stats["note"]
-    assert "1 行，未计入汇总" in stats["note"]        # 复测被拒的那 1 行
+    assert "A/B 计时口径不一致，性能差异不可直接比较（1 行，未计入汇总）" in stats["note"]
+    assert "复测计时口径不一致，主轮次结论未确认（1 行，未计入汇总）" in stats["note"]
 
 
 def test_unconfirmed_covers_every_confirm_state_but_a_plain_undecided():
@@ -172,14 +173,14 @@ def test_row_notes_fall_back_to_a_generic_note_without_a_confirm_column():
     rows = [_row(flags="unconfirmed", confirm="", gap=0.2)]
     assert rlc_report.row_notes(rows, None, {}, "main:kron@kron") == [
         "结果未确认（1 行，未计入汇总）"]
-    assert rlc_report.row_notes(rows, None, {}, "main:kron@kron", dropping=False) == [
+    assert rlc_report.row_notes(rows, None, {}, "main:kron@kron", include_unconfirmed=True) == [
         "结果未确认（1 行，仍计入汇总）"]
     named = [_row(flags="unconfirmed", confirm="not_reproduced", gap=0.2)]
     assert rlc_report.row_notes(named, None, {}, "main:kron@kron") == [
         "复测未重现（1 行，未计入汇总）"]
     mismatch = [_row(flags="unconfirmed;timer_mismatch", gap=0.2)]
     assert rlc_report.row_notes(mismatch, None, {}, "main:kron@kron") == [
-        "A/B 计时口径不一致，性能差异不可直接比较（未计入收益/损失汇总，1 行）"]
+        "A/B 计时口径不一致，性能差异不可直接比较（1 行，未计入汇总）"]
 
 
 def test_summarizing_reports_the_generic_note_when_confirm_is_missing(tmp_path):
@@ -317,6 +318,7 @@ def test_main_reads_a_single_op_gate(monkeypatch, tmp_path):
 def test_dtype_groups_and_formatters():
     assert rlc_report.dtype_group("torch.bfloat16") == "bf16"
     assert rlc_report.dtype_group("torch.float16") == "fp16"
+    assert rlc_report.dtype_group("torch.float32") == "float32"
     assert rlc_report.dtype_group("torch.complex64") == "fp8 / complex64"
     assert rlc_report.dtype_group("torch.int32") is None
     assert rlc_report.fmt_time(0.0) == "<0.1 µs"
@@ -326,22 +328,35 @@ def test_dtype_groups_and_formatters():
 
 
 def test_op_entry_counts_the_dtypes_the_table_has_no_column_for():
-    """A dtype without a column (float32, ...) is not a dtype to drop: its rows still
+    """A dtype without a column (int8, ...) is not a dtype to drop: its rows still
     name a gain or a regression of the op, and the note says they are not shown."""
-    rows = [_row(gap=0.05), _row(gap=-0.5, row=1, dtype="torch.float32", a=2.0, b=3.0)]
+    rows = [_row(gap=0.05), _row(gap=-0.5, row=1, dtype="torch.int8", a=2.0, b=3.0)]
     groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
     entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
     assert entry["rows"] == 2
     assert list(entry["groups"]) == ["bf16"]
-    assert entry["cost"] == pytest.approx(1.0)   # the float32 row's regression
-    assert "float32 1 行" in entry["note"]
+    assert entry["cost"] == pytest.approx(1.0)   # the int8 row's regression
+    assert "int8 1 行" in entry["note"]
+
+
+def test_op_entry_gives_a_float32_column_its_own_group():
+    """float32 has a column of its own, so its rows are no longer a note: they are a
+    group with their own gain/loss ranges and the note stays silent about them."""
+    rows = [_row(gap=0.05), _row(gap=-0.5, row=1, dtype="torch.float32", a=2.0, b=3.0)]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert entry["rows"] == 2
+    assert list(entry["groups"]) == ["bf16", "float32"]
+    assert entry["groups"]["float32"]["loss"] == (-0.5, -0.5, 1)
+    assert entry["cost"] == pytest.approx(1.0)
+    assert "未按 dtype 分列" not in entry["note"]
 
 
 def test_op_entry_keeps_the_warnings_of_an_ungrouped_dtype():
     """A row the table has no column for still carries do_bench timing, a replay/
     config mismatch and the manual note — dropping them would make a result that no
     longer uses the same config look fine."""
-    rows = [_row(dtype="torch.float32", flags="do_bench;replay_fallback", gate="unchanged",
+    rows = [_row(dtype="torch.int8", flags="do_bench;replay_fallback", gate="unchanged",
                  verdict="slower")]
     groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
     entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None,
@@ -350,13 +365,13 @@ def test_op_entry_keeps_the_warnings_of_an_ungrouped_dtype():
     assert "do_bench 计时（表级标记覆盖 1/1 行；host 同步）" in entry["note"]
     assert "replay 回退，config 不一致" in entry["note"]
     assert "手工：选到不同 autotune" in entry["note"]
-    assert "float32 1 行" in entry["note"]
+    assert "int8 1 行" in entry["note"]
 
 
 def test_op_entry_gathers_warnings_from_every_dtype():
     """The op's note is not the union of its dtype groups' notes: a warning only the
-    float32 row carries still has to appear next to the bf16 columns."""
-    rows = [_row(gap=0.05), _row(dtype="torch.float32", row=1, gap=-0.1,
+    int8 row carries still has to appear next to the bf16 columns."""
+    rows = [_row(gap=0.05), _row(dtype="torch.int8", row=1, gap=-0.1,
                                  flags="replay_fallback", verdict="slower")]
     groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
     entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
@@ -385,13 +400,138 @@ def test_op_entry_keeps_the_plain_unchanged_warning_when_every_dtype_agrees():
 
 def test_ungrouped_note_is_empty_when_every_row_has_a_column():
     assert rlc_report.ungrouped_note([_row(dtype="torch.bfloat16"),
+                                      _row(dtype="torch.float32"),
                                       _row(dtype="torch.float8_e4m3fn")]) == ""
+
+
+def test_accuracy_failed_is_a_fail_timeout_or_error_but_not_no_test():
+    """`no_test` and an empty cell are not failures: the gate never ran, or had nothing
+    to run, and the A/B stands as measured. Only a side the gate rejected is one."""
+    for cell in ("", "a:pass,b:pass", "a:no_test,b:no_test"):
+        assert not rlc_report.accuracy_failed(_row(accuracy=cell))
+    for cell in ("a:pass,b:fail", "a:timeout,b:pass", "b:error"):
+        assert rlc_report.accuracy_failed(_row(accuracy=cell))
+
+
+def test_accuracy_failed_flag_survives_a_dropped_accuracy_column():
+    """ab_compare.py --csv marks the row in `flags` too, so a CSV trimmed down to that
+    column still keeps a rejected op out of the summaries."""
+    assert rlc_report.accuracy_failed(_row(accuracy="", flags="accuracy_failed"))
+    assert not rlc_report.accuracy_failed(_row(accuracy="", flags="do_bench"))
+
+
+def test_a_row_flagged_accuracy_failed_is_not_counted_without_the_column():
+    rows = [_row(gap=0.5, a=1.0, b=0.5, flags="accuracy_failed")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert entry["saving"] == 0.0
+    assert "精度失败（历史性能仅供参考，1 行，未计入汇总）" in entry["note"]
+
+
+def test_a_doubly_marked_row_is_never_called_counted_by_the_note_left_on():
+    """The two exclusions are independent switches and a row can carry both marks. With
+    one switch on, the other reason still keeps the row out, so that note must not say
+    "仍计入汇总" -- the numbers would contradict the note right next to them."""
+    row = _row(gap=0.5, a=1.0, b=0.5, accuracy="a:pass,b:fail",
+               confirm="insufficient_rounds")
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups([row])}
+
+    def entry(**kw):
+        return rlc_report.op_entry("main:kron@kron", [row], groups, {}, None, {}, {}, {}, **kw)
+
+    both_off = entry()
+    assert both_off["saving"] == 0.0
+    assert both_off["note"] == (
+        "精度失败（a:pass,b:fail；历史性能仅供参考，1 行，未计入汇总）；"
+        "复测样本不足，主轮次结论未确认（1 行，未计入汇总）")
+
+    only_accuracy = entry(include_accuracy_failed=True)
+    assert only_accuracy["saving"] == 0.0            # the unconfirmed reason still holds
+    assert "仍计入汇总" not in only_accuracy["note"]
+    assert "复测样本不足，主轮次结论未确认（1 行，未计入汇总）" in only_accuracy["note"]
+
+    only_unconfirmed = entry(include_unconfirmed=True)
+    assert only_unconfirmed["saving"] == 0.0         # the accuracy reason still holds
+    assert "仍计入汇总" not in only_unconfirmed["note"]
+    assert "精度失败（a:pass,b:fail；历史性能仅供参考，1 行，未计入汇总）" \
+        in only_unconfirmed["note"]
+
+    both_on = entry(include_unconfirmed=True, include_accuracy_failed=True)
+    assert both_on["saving"] == pytest.approx(0.5)
+    assert both_on["note"] == (
+        "精度失败（a:pass,b:fail；历史性能仅供参考，1 行，仍计入汇总）；"
+        "复测样本不足，主轮次结论未确认（1 行，仍计入汇总）")
+
+
+def test_a_note_says_how_many_of_its_rows_are_counted_when_the_two_marks_split():
+    """One switch can count part of a note's rows and not the rest: the note has to say
+    so instead of picking one of "all" or "none"."""
+    rows = [_row(gap=0.5, a=1.0, b=0.5, accuracy="a:pass,b:fail"),
+            _row(row=1, gap=0.2, a=0.3, b=0.1, accuracy="a:pass,b:fail",
+                 confirm="insufficient_rounds")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {},
+                                include_accuracy_failed=True)
+    assert entry["saving"] == pytest.approx(0.5)      # only the clean failed row counts
+    assert "精度失败（a:pass,b:fail；历史性能仅供参考，2 行，其中 1 行未计入汇总）" \
+        in entry["note"]
+
+
+def test_accuracy_failure_states_match_ab_compare():
+    """The CSV's `accuracy` cell is read here and written there: the two must agree on
+    what counts as a rejected side, or the report and the table would disagree."""
+    import ab_compare
+
+    for cell in ("", "a:pass,b:pass", "a:no_test,b:no_test", "a:pass,b:fail",
+                 "a:timeout,b:pass", "b:error", "fail", ":"):
+        assert (rlc_report.accuracy_failed(_row(accuracy=cell))
+                == ab_compare.accuracy_failed(cell)), cell
+
+
+def test_a_gate_failed_row_is_shown_but_not_counted():
+    """ab_run.py leaves the rounds of an earlier invocation on disk when the gate now
+    rejects the op, so the row is still reported -- but its saving describes the build
+    the test rejected, so it must not enter the gain/loss or saving/cost figures."""
+    rows = [_row(gap=0.05, a=0.05, b=0.04),
+            _row(gap=0.5, row=1, a=1.0, b=0.5, accuracy="a:pass,b:fail")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {})
+    assert entry["rows"] == 2
+    assert entry["saving"] == pytest.approx(0.01)
+    assert entry["cost"] == 0.0
+    assert entry["groups"]["bf16"]["gain"] == (0.05, 0.05, 1)
+    assert "精度失败（a:pass,b:fail；历史性能仅供参考" in entry["note"]
+    assert "1 行，未计入汇总" in entry["note"]
+
+
+def test_include_accuracy_failed_counts_the_rows_again():
+    rows = [_row(gap=0.5, a=1.0, b=0.5, accuracy="a:pass,b:fail")]
+    groups = {g.dtype: g.rows for g in rlc_report.build_groups(rows)}
+    entry = rlc_report.op_entry("main:kron@kron", rows, groups, {}, None, {}, {}, {},
+                                include_accuracy_failed=True)
+    assert entry["saving"] == pytest.approx(0.5)
+    assert "1 行，仍计入汇总" in entry["note"]
+
+
+def test_read_ab_csv_keeps_the_accuracy_cell(tmp_path):
+    """The gate's outcome only reaches this report through the CSV column, so the reader
+    has to keep it -- a dropped column silently turned rejected rows back into savings."""
+    path = tmp_path / "rows.csv"
+    path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict,accuracy\n"
+        "main:kron@kron,main/kron,kron,torch.bfloat16,0,0.1,1.0,0.9,changed,,faster,"
+        '"a:pass,b:fail"\n',
+        encoding="utf-8")
+    row = rlc_report.read_ab_csv(path)[0]
+    assert row.accuracy == "a:pass,b:fail"
+    assert rlc_report.accuracy_failed(row)
 
 
 def test_main_reports_an_op_that_only_ran_float32(monkeypatch, tmp_path):
     """The CSV is the source of the op list: an op whose rows are all float32 still
     gets its table row (and its saving/cost), instead of the report coming back
-    empty while the input had rows."""
+    empty while the input had rows. float32 has a column of its own now, so those
+    rows land in that column instead of the note."""
     csv_path = tmp_path / "rows.csv"
     csv_path.write_text(
         "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
@@ -406,8 +546,29 @@ def test_main_reports_an_op_that_only_ran_float32(monkeypatch, tmp_path):
     assert len(seen["rows"]) == 1
     entry = seen["rows"][0]
     assert entry["label"] == "main:kron@kron" and entry["rows"] == 1
+    assert list(entry["groups"]) == ["float32"]
+    assert entry["cost"] == pytest.approx(0.2)
+    assert "未按 dtype 分列" not in entry["note"]
+
+
+def test_main_reports_an_op_that_only_ran_an_unlisted_dtype(monkeypatch, tmp_path):
+    """Same for a dtype with no column at all (int8): the op keeps its row, its
+    saving/cost, and a note naming the rows the table does not show."""
+    csv_path = tmp_path / "rows.csv"
+    csv_path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        "vllm:pack_int8@pack,vllm/pack_int8,pack_int8,torch.int8,0,-0.2,1.0,1.2,"
+        "changed,,slower\n",
+        encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(rlc_report, "write_xlsx",
+                        lambda path, rows, title, env: seen.update(rows=rows))
+    monkeypatch.setattr(sys, "argv", ["rlc_report.py", "--csv", str(csv_path),
+                                      "--out", str(tmp_path / "out.xlsx")])
+    rlc_report.main()
+    entry = seen["rows"][0]
     assert entry["groups"] == {} and entry["cost"] == pytest.approx(0.2)
-    assert "float32 1 行" in entry["note"]
+    assert "int8 1 行 未按 dtype 分列" in entry["note"]
 
 
 def test_notes_are_automatic_and_manual(monkeypatch, tmp_path):
@@ -423,21 +584,32 @@ def test_xlsx_has_the_expected_groups(tmp_path):
     from openpyxl import load_workbook
 
     path = tmp_path / "out.xlsx"
-    rows = [{"name": "kron", "label": "main:kron@kron", "rows": 2,
-             "groups": {"bf16": rlc_report.summarizing(
-                 [_row(gap=1.5, row=0), _row(gap=-0.1, row=1)], {}, None, {},
-                 "main:kron@kron", "bf16")},
+    rows = [{"name": "kron", "label": "main:kron@kron", "rows": 3,
+             "groups": {
+                 "bf16": rlc_report.summarizing(
+                     [_row(gap=1.5, row=0), _row(gap=-0.1, row=1)], {}, None, {},
+                     "main:kron@kron", "bf16"),
+                 "float32": rlc_report.summarizing(
+                     [_row(dtype="torch.float32", row=2, gap=-0.3, a=2.0, b=3.0)],
+                     {}, None, {}, "main:kron@kron", "float32")},
              "saving": 0.03, "cost": 0.001, "note": ""}]
     rlc_report.write_xlsx(path, rows, "title", "env")
     ws = load_workbook(path).active
-    assert ws.max_column == 27
+    assert ws.max_column == 34
     assert ws.cell(4, 3).value == "bf16"
     assert ws.cell(4, 10).value == "fp16"
-    assert ws.cell(4, 17).value == "fp8 / complex64"
+    assert ws.cell(4, 17).value == "float32"
+    assert ws.cell(4, 24).value == "fp8 / complex64"
+    assert ws.cell(5, 24).value == "类型"
     assert ws.cell(6, 3).value == "最弱"
+    assert ws.cell(6, 17).value == "最弱"
+    assert ws.cell(6, 34).value == "备注"
     assert ws.cell(7, 2).value == "kron"
     assert ws.cell(7, 3).value == "+150.0%"
     assert ws.cell(7, 6).value == "-10.0%"
+    assert not ws.cell(7, 17).value           # float32 gain range: empty
+    assert ws.cell(7, 20).value == "-30.0%"    # float32 column, its own group
+    assert ws.cell(7, 32).value == "30 µs"
 
 
 def _one_op_table(tmp_path, cell):

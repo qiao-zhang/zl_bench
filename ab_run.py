@@ -24,6 +24,8 @@ per-row verdicts.
 
   # same, but run each side's unit test first and skip the ops it fails
   python ab_run.py ... --accuracy-gate --out runs/ab_x
+  # ... and point the gate at tests whose function name differs from the op
+  python ab_run.py ... --accuracy-gate --accuracy-map ops/accuracy_map.txt --out runs/ab_x
 
 Output: <out>/r<k>_a and <out>/r<k>_b, each laid out like a run_batch.py batch dir
 (ops_status.csv, summary.csv, <repo>/<run_name>/), and <out>/ab.json with the sides.
@@ -33,8 +35,10 @@ With --accuracy-gate each side's unit test for the op (tests/test_<op_file>.py::
 of that repo) runs before the first round, and an op a side does not pass gets no A/B
 at all: a compiler that changes the numbers is not a performance result. An op whose
 repo has no matching test is not dropped -- it is recorded as no_test, since the
-benchmark inventory and the tests are not 1:1. The outcome, including why an op was
-skipped, goes to ab.json and into ab_compare.py's report.
+benchmark inventory and the tests are not 1:1. --accuracy-map names the test of the
+ops the automatic lookup cannot find (its test function may carry any name), one
+`[repo:]op[@op_file] tests/...py[::test_func]` per line. The outcome, including why
+an op was skipped, goes to ab.json and into ab_compare.py's report.
 """
 
 from __future__ import annotations
@@ -120,10 +124,16 @@ def parse_args() -> argparse.Namespace:
 
     g = p.add_argument_group("accuracy gate")
     g.add_argument("--accuracy-gate", action="store_true",
-                   help="before the A/B, run each side's unit test for every op "
-                        "(tests/test_<op_file>.py::test_<op> of that repo) and skip the ops "
-                        "a side does not pass; the outcome goes to ab.json and into "
-                        "ab_compare.py's report")
+                   help="before the A/B, run each side's unit test for every op and skip "
+                        "the ops a side does not pass; the test is the exact "
+                        "tests/test_<op_file>.py::test_<op>, else every test function whose "
+                        "name contains it, else the one --accuracy-map names. The outcome "
+                        "goes to ab.json and into ab_compare.py's report")
+    g.add_argument("--accuracy-map", type=Path, default=None, metavar="FILE",
+                   help="the gate's test per op, for the ops the automatic lookup cannot "
+                        "locate: one '<[repo:]op[@op_file]> <target> [target...]' per line, "
+                        "target a path under that repo's tests/ with an optional ::test_func "
+                        "(relative to the repo root), '#' comments")
     g.add_argument("--accuracy-timeout", type=int, default=1800,
                    help="timeout of one unit-test run in seconds, 0 = none (default %(default)s)")
     args = p.parse_args()
@@ -135,6 +145,11 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit(f"{LOG} no record dir {args.record}")
     if args.shape_file:
         args.shape_file = args.shape_file.resolve()
+    args.accuracy_map_file = args.accuracy_map.resolve() if args.accuracy_map else None
+    args.accuracy_map = load_accuracy_map(args.accuracy_map_file) if args.accuracy_map_file else {}
+    if args.accuracy_map and not args.accuracy_gate:
+        print(f"{LOG} note: --accuracy-map only applies together with --accuracy-gate",
+              flush=True)
     args.out = (args.out or ZL_BENCH / "runs" / f"ab_{datetime.now():%Y%m%d-%H%M%S}").resolve()
     # absolute paths, so that a resumed run with a relative path matches ab.json
     args.sides = {side: {"name": getattr(args, f"{side}_name"),
@@ -212,30 +227,132 @@ PYTEST_NO_TESTS_RC = 5
 _COUNT_RE = re.compile(r"(\d+) (passed|failed|skipped|error|errors|xfailed|xpassed)")
 
 
-def _defines(path: Path, name: str) -> bool:
-    """True when the module defines a function `name`."""
+def _test_functions(path: Path) -> List[str]:
+    """The test functions the module defines, in the order it defines them."""
     try:
         tree = ast.parse(path.read_text(errors="replace"))
     except (OSError, SyntaxError):
-        return False
-    return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
-               for n in ast.walk(tree))
+        return []
+    return [n.name for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name.startswith("test")]
 
 
-def test_target(case: run_batch.Case) -> Optional[str]:
-    """`tests/test_<op_file>.py::test_<op>` of the case's repo, or None when that
-    repo has no unit test for the op.
+def op_spec(spec: str) -> Tuple[str, str, str]:
+    """`[repo:]op[@op_file]` -> (repo, op, op_file), read as --ops/--ops-file read it.
+    op_file is empty when the spec leaves it out, which is how an --accuracy-map
+    entry covers an op whatever benchmark file it sits in."""
+    repo, _, rest = spec.rpartition(":")
+    repo = repo or "main"
+    op, _, op_file = rest.partition("@")
+    if repo not in REPOS:
+        raise ValueError(f"unknown repo {repo!r} (known: {', '.join(REPOS)})")
+    if not op:
+        raise ValueError("no op name")
+    return repo, op, op_file
 
-    The inventory of benchmarks and the tests are not 1:1: `perf_`-prefixed
-    functions, inplace and out variants share one test, and some benchmarks have
-    no test at all. A missing match is therefore a normal outcome (no_test, the
-    op still gets an A/B) and not an error."""
+
+def map_target(repo: str, token: str) -> str:
+    """One target of an --accuracy-map line: a file under that repo's tests/, with an
+    optional ::test_func, relative to the repo root. Canonicalised to `tests/<rel>`
+    so the recorded target reads the same for every spelling of the path."""
+    rel, _, node = token.partition("::")
+    root = REPOS[repo].resolve()
+    tests_dir = (root / GATE_TESTS).resolve()
+    path = (root / rel).resolve()
+    if tests_dir not in path.parents:
+        raise ValueError(f"{token!r}: target must be a file under {GATE_TESTS}/ of the "
+                         f"{repo} repo")
+    if not path.is_file():
+        raise ValueError(f"{token!r}: no such file")
+    shown = f"{GATE_TESTS}/{path.relative_to(tests_dir).as_posix()}"
+    return f"{shown}::{node}" if node else shown
+
+
+def load_accuracy_map(path: Path) -> Dict[Tuple[str, str, str], str]:
+    """`--accuracy-map`: {(repo, op, op_file): pytest target} for the ops whose unit
+    test the automatic lookup cannot name.
+
+    One line per op, `[repo:]op[@op_file] target [target...]`, `#` comments. A line
+    may name several targets (several test functions of one file) and may leave
+    op_file out to cover the op in any benchmark file. Every target is checked here,
+    at startup: a mistyped path should stop the run, not resurface as no_test after
+    hours of benchmarking."""
+    if not path.is_file():
+        raise SystemExit(f"{LOG} no accuracy map {path}")
+    entries: Dict[Tuple[str, str, str], str] = {}
+    errors: List[str] = []
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        text = line.split("#", 1)[0].strip()
+        if not text:
+            continue
+        parts = text.split()
+        where = f"{path}:{lineno}"
+        if len(parts) < 2:
+            errors.append(f"{where}: expected '<[repo:]op[@op_file]> <tests/target.py"
+                          "[::test_func]>'")
+            continue
+        try:
+            key = op_spec(parts[0])
+            targets = [map_target(key[0], token) for token in parts[1:]]
+        except ValueError as exc:
+            errors.append(f"{where}: {exc}")
+            continue
+        if key in entries:
+            errors.append(f"{where}: {parts[0]} is mapped twice")
+            continue
+        entries[key] = " ".join(targets)
+    if errors:
+        for e in errors:
+            print(f"{LOG} error: {e}", file=sys.stderr)
+        raise SystemExit(f"{LOG} the accuracy map {path} has errors")
+    if not entries:
+        raise SystemExit(f"{LOG} the accuracy map {path} names no op")
+    return entries
+
+
+def mapped_test_target(case: run_batch.Case,
+                       mapping: Optional[Dict[Tuple[str, str, str], str]]) -> Optional[str]:
+    """The map's target for the case: the entry with its op_file first, then the one
+    without (which covers the op in any benchmark file)."""
+    if not mapping:
+        return None
+    for key in ((case.repo, case.op, case.op_file), (case.repo, case.op, "")):
+        if mapping.get(key):
+            return mapping[key]
+    return None
+
+
+def auto_test_target(case: run_batch.Case) -> Optional[str]:
+    """`tests/test_<op_file>.py::test_<op>` of the case's repo, or None when that repo
+    has no unit test for the op.
+
+    The exact name wins; when the file has no such function, every test function whose
+    name contains `test_<op>` is taken instead (`test_chunk_kda_matches_torch_reference`
+    for `chunk_kda`, `test_abs_` for `abs`). The inventory of benchmarks and the tests
+    are not 1:1 (`perf_`-prefixed functions, inplace and out variants share one test,
+    some benchmarks have no test at all), so a missing match is a normal outcome
+    (no_test, the op still gets an A/B) and not an error."""
     tests_dir = (REPOS[case.repo] / GATE_TESTS).resolve()
     path = (tests_dir / f"test_{case.op_file}.py").resolve()
-    name = f"test_{case.op}"
-    if tests_dir not in path.parents or not path.is_file() or not _defines(path, name):
+    if tests_dir not in path.parents or not path.is_file():
         return None
-    return f"{GATE_TESTS}/test_{case.op_file}.py::{name}"
+    name = f"test_{case.op}"
+    names = _test_functions(path)
+    picked = [name] if name in names else [n for n in names if name in n]
+    if not picked:
+        return None
+    shown = f"{GATE_TESTS}/test_{case.op_file}.py"
+    return " ".join(f"{shown}::{n}" for n in picked)
+
+
+def test_target(case: run_batch.Case,
+                mapping: Optional[Dict[Tuple[str, str, str], str]] = None) -> Optional[str]:
+    """The pytest target(s) of the case's unit test, or None when there is none.
+
+    The map comes first -- it names the test of an op whose function carries another
+    name -- then the automatic lookup. Several targets are separated by spaces."""
+    return mapped_test_target(case, mapping) or auto_test_target(case)
 
 
 def accuracy_env(args: argparse.Namespace, side: str, gpu: str) -> Dict[str, str]:
@@ -302,17 +419,19 @@ def gate_detail(text: str, status: str) -> str:
 def run_accuracy(case: run_batch.Case, side: str, args: argparse.Namespace,
                  gpu: str) -> Dict[str, str]:
     """One (op, side): its unit test in a fresh process, like one A/B run."""
-    target = test_target(case)
+    mapping = getattr(args, "accuracy_map", None) or {}
+    target = test_target(case, mapping)
     if target is None:
         return {"status": GATE_NO_TEST, "target": "", "return_code": "", "elapsed_ms": "0",
-                "log": "", "detail": f"no {GATE_TESTS}/test_{case.op_file}.py::test_{case.op}"}
+                "log": "", "detail": f"no {GATE_TESTS}/test_{case.op_file}.py::test_{case.op}"
+                                     ", and no --accuracy-map entry"}
     out_dir = args.out / GATE_DIR / side / case.repo / case.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     log = out_dir / "gate.log"
     t0 = time.time()
     # -ra: skip and failure summary lines, because a test that skipped half its dtypes
     # (or all of them) still exits 0.
-    cmd = ["python", "-m", "pytest", "-q", "-ra", "-p", "no:cacheprovider", target]
+    cmd = ["python", "-m", "pytest", "-q", "-ra", "-p", "no:cacheprovider", *target.split()]
     with log.open("w") as f:
         proc = subprocess.Popen(cmd, cwd=str(REPOS[case.repo]), env=accuracy_env(args, side, gpu),
                                 stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
@@ -336,17 +455,40 @@ def load_gate(out: Path) -> Dict[str, Dict[str, Dict[str, str]]]:
 
 
 def save_gate(out: Path, gate: Dict[str, Dict[str, Dict[str, str]]],
-              skipped: Dict[str, str]) -> None:
+              skipped: Dict[str, str], map_file: str = "", map_entries: int = 0) -> None:
     """Merge the gate results into ab.json, next to the manifest fields."""
     path = out / ab_compare.MANIFEST
     data = json.loads(path.read_text()) if path.is_file() else {}
-    data["accuracy"] = {"tests_dir": GATE_TESTS,
-                        "skipped": {run: why for run, why in sorted(skipped.items())},
-                        "sides": {side: gate[side] for side in SIDES if gate.get(side)}}
+    accuracy = {"tests_dir": GATE_TESTS,
+                "skipped": {run: why for run, why in sorted(skipped.items())},
+                "sides": {side: gate[side] for side in SIDES if gate.get(side)}}
+    if map_file:
+        # Where the targets of the ops the automatic lookup cannot name came from.
+        accuracy["map"] = {"file": map_file, "entries": map_entries}
+    data["accuracy"] = accuracy
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=1) + "\n")
     os.replace(tmp, path)
+
+
+def gate_reusable(case: run_batch.Case, row: Optional[Dict[str, str]],
+                  mapping: Optional[Dict[Tuple[str, str, str], str]]) -> bool:
+    """Whether a recorded row spares the gate another run: a pass of the same target,
+    or a no_test with no target still (a --accuracy-map entry or a widened match that
+    now locates a test reruns it, so a better map takes effect on the same --out).
+
+    The target is part of the key, not just the outcome: a pass recorded for another
+    test (an --accuracy-map entry that now names a stricter one) says nothing about
+    the test this run would execute, so it reruns. A recorded pass that carries no
+    target at all (an ab.json from before targets were recorded) reruns once and then
+    carries one, so this costs at most one extra gate per op."""
+    status = (row or {}).get("status")
+    current = test_target(case, mapping)
+    if status == GATE_PASS:
+        recorded = (row or {}).get("target") or ""
+        return bool(recorded) and recorded == current
+    return status == GATE_NO_TEST and current is None
 
 
 def accuracy_gate(cases: List[run_batch.Case], args: argparse.Namespace,
@@ -354,9 +496,12 @@ def accuracy_gate(cases: List[run_batch.Case], args: argparse.Namespace,
     """Run each side's unit test for every selected op (--accuracy-gate) and drop the
     ops a side fails. Returns the cases to measure and {run: why it was dropped}.
 
-    Recorded pass/no_test rows are reused, so resuming and --add-rounds do not rerun
-    the gate. Ops without a matching test keep their A/B: the gate cannot verify them,
-    which ab.json records as no_test rather than as a pass."""
+    Recorded results are reused when they still describe the test this run would run
+    (a pass of the same target, a no_test with no target), so resuming and
+    --add-rounds do not rerun the gate. Ops without a matching test keep their A/B:
+    the gate cannot verify them, which ab.json records as no_test rather than as a
+    pass."""
+    mapping = getattr(args, "accuracy_map", None) or {}
     gate: Dict[str, Dict[str, Dict[str, str]]] = {
         side: dict(load_gate(args.out).get(side) or {}) for side in SIDES}
     work: List[Tuple[run_batch.Case, str]] = []
@@ -364,7 +509,7 @@ def accuracy_gate(cases: List[run_batch.Case], args: argparse.Namespace,
     for case in cases:
         run = f"{case.repo}/{case.run_name}"
         for side in SIDES:
-            if (gate[side].get(run) or {}).get("status") in (GATE_PASS, GATE_NO_TEST):
+            if gate_reusable(case, gate[side].get(run), mapping):
                 reused += 1
             else:
                 work.append((case, side))
@@ -416,7 +561,9 @@ def accuracy_gate(cases: List[run_batch.Case], args: argparse.Namespace,
                          for c in cases)
         print(f"{LOG} accuracy gate {side.upper()}: "
               + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())), flush=True)
-    save_gate(args.out, gate, skipped)
+    save_gate(args.out, gate, skipped,
+              map_file=str(getattr(args, "accuracy_map_file", "") or ""),
+              map_entries=len(mapping))
     if skipped:
         print(f"{LOG} {len(skipped)} ops skipped by the accuracy gate (recorded in ab.json)",
               flush=True)

@@ -1,5 +1,6 @@
 import csv
 import json
+import sys
 
 import ab_compare
 
@@ -131,6 +132,54 @@ def test_report_and_csv_flag_timer_mismatch(tmp_path, capsys):
     assert "timer_mismatch" in row["flags"].split(";")
     assert row["timer"] == "mixed"
     assert row["timer_rounds"] == "1:a,2:a,3:a,4:a,5:a,6:a"
+
+
+def test_accuracy_failed_reads_the_gate_cell():
+    """Only a side the gate rejected counts: an empty cell (no --accuracy-gate) and
+    no_test (nothing to run) leave the A/B standing as measured."""
+    for cell in ("", "a:pass,b:pass", "a:no_test,b:no_test"):
+        assert not ab_compare.accuracy_failed(cell)
+    for cell in ("a:pass,b:fail", "a:timeout,b:pass", "b:error"):
+        assert ab_compare.accuracy_failed(cell)
+
+
+def test_report_leaves_a_gate_failed_op_out_of_the_counts(tmp_path, capsys):
+    """--accuracy-gate stops giving the op new rounds, but the rounds of an earlier
+    invocation stay on disk. They are still shown -- and must not be counted: their
+    faster verdict was measured on a build the unit test now rejects."""
+    out = _ab_dir(tmp_path, 6, 0.2, 0.2 / 1.1)      # row 1 is 10% faster on B
+    manifest = json.loads((out / "ab.json").read_text())
+    manifest["accuracy"] = {"sides": {side: {"main/softmax": {
+        "status": "pass" if side == "a" else "fail"}} for side in ("a", "b")}}
+    results = ab_compare.analyze(out, min_rounds=5)
+    assert any(r.stats.verdict == "faster" for r in results)
+
+    ab_compare.report(results, ab_compare.op_labels(out), manifest, False, False)
+    printed = capsys.readouterr().out
+    assert "== rows: 0; faster 0, slower 0, same 0, undecided 0" in printed
+    assert "accuracy failed (a side the gate rejected): 2 rows in 1 ops" in printed
+    assert "historical performance only" in printed
+    assert "a:pass,b:fail" in printed
+
+    path = tmp_path / "rows.csv"
+    ab_compare.write_csv(path, results, ab_compare.op_labels(out), manifest)
+    rows = list(csv.DictReader(path.open(newline="")))
+    assert len(rows) == 2                       # every row is still recorded
+    assert {r["accuracy"] for r in rows} == {"a:pass,b:fail"}
+
+
+def test_report_still_counts_an_op_the_gate_could_not_test(tmp_path, capsys):
+    """no_test is not a rejection: the gate had nothing to run, and the A/B is the only
+    evidence there is. Excluding those rows would empty the report of most ops."""
+    out = _ab_dir(tmp_path, 6, 0.2, 0.2 / 1.1)
+    manifest = json.loads((out / "ab.json").read_text())
+    manifest["accuracy"] = {"sides": {side: {"main/softmax": {"status": "no_test"}}
+                                      for side in ("a", "b")}}
+    results = ab_compare.analyze(out, min_rounds=5)
+    ab_compare.report(results, ab_compare.op_labels(out), manifest, False, False)
+    printed = capsys.readouterr().out
+    assert "accuracy failed" not in printed
+    assert "faster 1," in printed
 
 
 def test_compare_pair_counts_the_mismatched_rows(tmp_path, capsys):
@@ -269,6 +318,69 @@ def test_recheck_ops_keeps_a_short_recheck_but_not_an_unfixable_one():
     assert (ops, rows) == (["main:softmax@softmax"], 2)
 
 
+def test_recheck_ops_leaves_out_an_op_the_gate_rejects():
+    """More rounds cannot fix a rejected side: ab_run.py gates the op out again before
+    measuring it, so a list made only of those ends the recheck with "every selected op
+    failed the accuracy gate" instead of producing samples."""
+    labels = {"main/softmax": "main:softmax@softmax"}
+    results = [_result(""), _result("", run="main/other")]
+    ops, rows = ab_compare.recheck_ops(results, labels, 0.02, skip_runs={"main/softmax"})
+    assert (ops, rows) == (["main/other"], 1)
+
+
+def test_accuracy_failed_runs_leaves_no_test_and_an_ungated_dir_out():
+    """Only a rejected side keeps an op out of a recheck: no_test had nothing to run, and
+    a dir without a gate says nothing about accuracy either."""
+    assert ab_compare.accuracy_failed_runs({
+        "accuracy": {"sides": {side: {"main/softmax": {"status": "no_test"}}
+                               for side in ("a", "b")}}}) == {}
+    assert ab_compare.accuracy_failed_runs({}) == {}
+    assert ab_compare.accuracy_failed_runs({
+        "accuracy": {"sides": {"b": {"main/softmax": {"status": "timeout"}}}}}) \
+        == {"main/softmax": "b:timeout"}
+
+
+def test_main_keeps_a_rejected_op_out_of_the_recheck_list(tmp_path, monkeypatch):
+    """--recheck-list is an --ops-file for ab_run.py: an op the gate rejects must not be
+    written into it, or the follow-up run stops before measuring anything."""
+    out = _ab_dir(tmp_path, 6, 0.2, 0.2 / 1.008)      # a 0.8% gap: decided but weak
+    path = tmp_path / "recheck.txt"
+    monkeypatch.setattr(sys, "argv", ["ab_compare.py", str(out), "--recheck-list",
+                                      str(path), "--quiet"])
+    ab_compare.main()
+    assert "main:softmax@softmax" in path.read_text()   # weak, and nothing rejects it
+
+    data = json.loads((out / "ab.json").read_text())
+    data["accuracy"] = {"sides": {side: {"main/softmax": {"status": "fail"}}
+                                  for side in ("a", "b")}}
+    (out / "ab.json").write_text(json.dumps(data))
+    ab_compare.main()
+    assert path.read_text() == ""
+
+
+def test_csv_marks_a_row_of_an_op_the_gate_rejects(tmp_path):
+    """The `accuracy` column can be dropped by whoever consumes the CSV, so the row must
+    also say it in `flags` -- while `gap_confirmed` keeps its timing/recheck meaning."""
+    out = _ab_dir(tmp_path, 6, 0.2, 0.2 / 1.1)
+    manifest = json.loads((out / "ab.json").read_text())
+    manifest["accuracy"] = {"sides": {side: {"main/softmax": {
+        "status": "pass" if side == "a" else "fail"}} for side in ("a", "b")}}
+    results = ab_compare.analyze(out, min_rounds=5)
+    path = tmp_path / "rows.csv"
+    ab_compare.write_csv(path, results, ab_compare.op_labels(out), manifest)
+    rows = list(csv.DictReader(path.open(newline="")))
+    assert {r["accuracy"] for r in rows} == {"a:pass,b:fail"}
+    assert all("accuracy_failed" in r["flags"].split(";") for r in rows)
+    assert {r["gap_confirmed"] for r in rows} == {"yes"}
+    assert "faster" in {r["verdict"] for r in rows}      # the verdict is still recorded
+
+    manifest["accuracy"] = {"sides": {side: {"main/softmax": {"status": "no_test"}}
+                                      for side in ("a", "b")}}
+    ab_compare.write_csv(path, results, ab_compare.op_labels(out), manifest)
+    rows = list(csv.DictReader(path.open(newline="")))
+    assert all("accuracy_failed" not in r["flags"] for r in rows)
+
+
 def test_confirm_marks_a_short_recheck_as_insufficient_rounds(tmp_path):
     """Two fresh rounds that agree on their timing are still too few to confirm: the row
     is marked and keeps its recheck statistics, and its samples are not merged. (The old
@@ -355,19 +467,28 @@ def test_accuracy_of_reads_each_side():
 
 def test_report_accuracy_shows_counts_and_skipped_ops(capsys):
     """The gate decides whether an op has an A/B at all, so the report names the ops it
-    dropped and how many are unverified (no_unit test upstream)."""
+    dropped and how many are unverified (no test the gate could locate)."""
     manifest = {"accuracy": {
         "tests_dir": "tests",
+        "map": {"file": "/x/accuracy_map.txt", "entries": 3},
         "sides": {"a": {"main/abs": {"status": "pass"}, "main/add": {"status": "pass"}},
                   "b": {"main/abs": {"status": "no_test"}, "main/add": {"status": "fail"}}},
         "skipped": {"main/add": "b:fail (FAILED tests/test_add.py::test_add - mismatch)"}}}
     ab_compare.report_accuracy(manifest, {"main/add": "main:add@add"})
     out = capsys.readouterr().out
     assert "accuracy gate (tests/ unit test per side): 2 ops checked" in out
+    assert "map: 3 op(s) named in /x/accuracy_map.txt" in out
     assert "A: pass 2" in out and "B: fail 1, no_test 1" in out
-    assert "no_test: 1" in out
+    assert "no_test: 1" in out and "--accuracy-map" in out
     assert "skipped A/B (a side did not pass): 1" in out
     assert "main:add@add" in out and "b:fail" in out
+
+
+def test_report_accuracy_omits_the_map_when_the_gate_used_none(capsys):
+    manifest = {"accuracy": {"sides": {"a": {"main/abs": {"status": "pass"}}},
+                             "skipped": {}}}
+    ab_compare.report_accuracy(manifest, {})
+    assert "map:" not in capsys.readouterr().out
 
 
 def test_report_accuracy_is_silent_without_a_gate(capsys):
