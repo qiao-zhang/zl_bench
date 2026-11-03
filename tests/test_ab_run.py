@@ -244,6 +244,240 @@ def test_test_target_takes_every_containing_function(monkeypatch, tmp_path):
         "tests/test_kda.py::test_kda_gate tests/test_kda.py::test_kda_state")
 
 
+def test_test_target_keeps_the_class_path_of_a_method(monkeypatch, tmp_path):
+    """Upstream collects whole files of class-based cases (`TestGridSample...`). A bare
+    `::test_x` is a node pytest cannot run: the gate would report rc 5 and no_test, and
+    an --accuracy-map built from it would fail the op."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_grid_sample.py").write_text(
+        "class TestNearest4D:\n"
+        "    def test_grid_sample_nearest(self):\n        pass\n"
+        "    def test_other(self):\n        pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case(op="grid_sample")) == (
+        "tests/test_grid_sample.py::TestNearest4D::test_grid_sample_nearest")
+
+
+def test_test_target_skips_a_plain_helper_class(monkeypatch, tmp_path):
+    """`class Helper` holding a `test_softmax` method is not collected by pytest
+    (`Helper::test_softmax` exits 4, and the gate would drop the op as an error): the
+    exact-name match must not prefer it over the real module-level case."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class Helper:\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_takes_a_testcase_with_its_own_init(monkeypatch, tmp_path):
+    """A unittest class may define `__init__` (unittest's own protocol); pytest still
+    collects it, so the gate must not treat the op as no_test."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "import unittest\n"
+        "class Custom(unittest.TestCase):\n"
+        "    def __init__(self, methodName='runTest'):\n"
+        "        super().__init__(methodName)\n"
+        "    def test_softmax(self):\n        pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::Custom::test_softmax"
+
+
+def test_test_target_does_not_guess_an_unresolved_base_class(monkeypatch, tmp_path):
+    """A base whose name merely ends in `TestCase` is not a TestCase: `Helper::test_softmax`
+    is not collected (rc 4), so the module-level case must win."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class FakeTestCase:\n    pass\n"
+        "class Helper(FakeTestCase):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_treats_a_dynamic_base_as_uncertain(monkeypatch, tmp_path):
+    """`class TestSoftmax(make_base())` cannot be resolved statically, so it is no target:
+    dropping the expression would collect a class pytest skips."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class Base:\n    __test__ = False\n"
+        "\n"
+        "def make_base():\n    return Base\n"
+        "\n"
+        "class TestSoftmax(make_base()):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_keeps_the_bases_bound_at_definition_time(monkeypatch, tmp_path):
+    """`Middle` was defined against the first `Root` (False); redefining `Root` later does
+    not change that, so `TestSoftmax(Middle)` is skipped and the module-level case wins."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class Root:\n    __test__ = False\n"
+        "\n"
+        "class Middle(Root):\n    pass\n"
+        "\n"
+        "class Root:\n    __test__ = True\n"
+        "\n"
+        "class TestSoftmax(Middle):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_resolves_the_flag_along_the_mro(monkeypatch, tmp_path):
+    """`TestSoftmax(Left, Right)` resolves `__test__` to Right's False through the MRO,
+    so pytest skips it and the module-level case must win."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class Root:\n    __test__ = True\n"
+        "\n"
+        "class Left(Root):\n    pass\n"
+        "\n"
+        "class Right(Root):\n    __test__ = False\n"
+        "\n"
+        "class TestSoftmax(Left, Right):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_does_not_keep_an_alias_a_star_import_may_shadow(monkeypatch,
+                                                                    tmp_path):
+    """`from support_base import *` may re-export `TC` as something else, so the alias
+    loses its certainty and `Helper(TC)` is no target: the module-level case wins."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "from unittest import TestCase as TC\n"
+        "from support_base import *\n"
+        "\n"
+        "class Helper(TC):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_does_not_keep_a_rebound_testcase_import(monkeypatch, tmp_path):
+    """`TC` is rebound to `object` by the second import, so `Helper(TC)` is no test: the
+    module-level case must win."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "from unittest import TestCase as TC\n"
+        "from builtins import object as TC\n"
+        "\n"
+        "class Helper(TC):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_takes_a_class_that_sets_test_true(monkeypatch, tmp_path):
+    """`__test__ = True` is pytest's opt-in for a class without the `Test*` prefix."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class Helper:\n"
+        "    __test__ = True\n"
+        "\n"
+        "    def test_softmax(self):\n        pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::Helper::test_softmax"
+
+
+def test_test_target_does_not_inherit_an_opt_out(monkeypatch, tmp_path):
+    """`__test__ = False` is read through `getattr`, so a subclass inherits it and pytest
+    collects nothing for it: the module-level case must win."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class Base:\n    __test__ = False\n"
+        "\n"
+        "class TestSoftmax(Base):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_does_not_inherit_an_init_from_a_plain_base(monkeypatch, tmp_path):
+    """pytest skips a test class that inherits a custom `__init__` (`hasinit` looks at the
+    whole class), so that node is not there (rc 4) and the module-level case must win."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class Base:\n"
+        "    def __init__(self):\n        pass\n"
+        "\n"
+        "class TestSoftmax(Base):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_does_not_inherit_a_plain_test_base(monkeypatch, tmp_path):
+    """`TestBase` is collectable by name; `Helper(TestBase)` is neither `Test*` nor a
+    TestCase, so `Helper::test_softmax` is not a node (rc 4) and the module-level case
+    has to win."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "class TestBase:\n    pass\n"
+        "\n"
+        "class Helper(TestBase):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_ignores_a_testcase_alias_shadowed_by_a_local_class(monkeypatch,
+                                                                       tmp_path):
+    """A `from unittest import TestCase as Base` inside a function binds nothing at module
+    level; `class Base` there is a plain class, so `Custom(Base)` is not collected and the
+    module-level case has to win."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "def helper():\n"
+        "    from unittest import TestCase as Base\n"
+        "\n"
+        "class Base:\n    pass\n"
+        "\n"
+        "class Custom(Base):\n"
+        "    def test_softmax(self):\n        pass\n"
+        "\n"
+        "def test_softmax_accuracy():\n    pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) == "tests/test_softmax.py::test_softmax_accuracy"
+
+
+def test_test_target_leaves_a_conditional_def_to_the_map(monkeypatch, tmp_path):
+    """`if flag: def test_x` only exists when the branch ran, which a static read cannot
+    decide; picking it would turn a maybe into a node pytest reports as not found, so the
+    op stays no_test until an --accuracy-map names it."""
+    root = _checkout(tmp_path)
+    (root / "tests" / "test_softmax.py").write_text(
+        "if some_flag:\n    def test_softmax(self):\n        pass\n")
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    assert ab_run.test_target(_case()) is None
+
+
 # ---------------- --accuracy-map ----------------
 
 def _map_file(tmp_path, text):

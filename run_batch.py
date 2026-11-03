@@ -173,6 +173,13 @@ def _dup_ops(inv: Dict[str, List[Dict[str, str]]]) -> Set[Tuple[str, str]]:
     return dup
 
 
+def run_index(inv: Dict[str, List[Dict[str, str]]]) -> Dict[str, Dict[str, str]]:
+    """`<repo>/<run_name>` -> its inventory row: the key ab.json and the round dirs use."""
+    dup = _dup_ops(inv)
+    return {f"{r['repo']}/{_run_name(r, dup)}": r
+            for rows in inv.values() for r in rows}
+
+
 def load_dismiss(path: Path) -> Set[Tuple[str, str]]:
     if not path.is_file():
         return set()

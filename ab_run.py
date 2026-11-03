@@ -38,13 +38,15 @@ repo has no matching test is not dropped -- it is recorded as no_test, since the
 benchmark inventory and the tests are not 1:1. --accuracy-map names the test of the
 ops the automatic lookup cannot find (its test function may carry any name), one
 `[repo:]op[@op_file] tests/...py[::test_func]` per line. The outcome, including why
-an op was skipped, goes to ab.json and into ab_compare.py's report.
+an op was skipped, goes to ab.json and into ab_compare.py's report; the no_test ops
+are searched for in both checkouts, and the candidates written to
+<out>/accuracy_no_test.md and <out>/accuracy_map.suggested.txt (a commented
+--accuracy-map draft) -- see accuracy_hints.py.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import csv
 import json
 import os
@@ -61,6 +63,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import ab_compare
+import accuracy_hints
 import batch_summary
 import run_batch
 from gen_inventory import REPOS, ZL_BENCH
@@ -228,14 +231,13 @@ _COUNT_RE = re.compile(r"(\d+) (passed|failed|skipped|error|errors|xfailed|xpass
 
 
 def _test_functions(path: Path) -> List[str]:
-    """The test functions the module defines, in the order it defines them."""
-    try:
-        tree = ast.parse(path.read_text(errors="replace"))
-    except (OSError, SyntaxError):
-        return []
-    return [n.name for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name.startswith("test")]
+    """The pytest nodes the module certainly defines, in file order.
+
+    `accuracy_hints.test_nodes` keeps the class path (`TestA::test_x`), skips functions
+    nested in a function, and leaves out the nodes pytest may not have (a `def` under an
+    `if`/`try`, a method of a class whose base cannot be resolved): a node that is not
+    there makes pytest exit 4, which the gate reads as an error, not as no_test."""
+    return accuracy_hints.test_nodes(path)
 
 
 def op_spec(spec: str) -> Tuple[str, str, str]:
@@ -327,23 +329,27 @@ def auto_test_target(case: run_batch.Case) -> Optional[str]:
     """`tests/test_<op_file>.py::test_<op>` of the case's repo, or None when that repo
     has no unit test for the op.
 
-    The exact name wins; when the file has no such function, every test function whose
+    The exact name wins; when the file has no such function, every test whose function
     name contains `test_<op>` is taken instead (`test_chunk_kda_matches_torch_reference`
-    for `chunk_kda`, `test_abs_` for `abs`). The inventory of benchmarks and the tests
-    are not 1:1 (`perf_`-prefixed functions, inplace and out variants share one test,
-    some benchmarks have no test at all), so a missing match is a normal outcome
+    for `chunk_kda`, `test_abs_` for `abs`). A test defined in a class keeps its class
+    path (`TestGridSampleEdgeCases::test_edge`), because that is the node pytest runs;
+    the name lookup itself is on the function part. The inventory of benchmarks and the
+    tests are not 1:1 (`perf_`-prefixed functions, inplace and out variants share one
+    test, some benchmarks have no test at all), so a missing match is a normal outcome
     (no_test, the op still gets an A/B) and not an error."""
     tests_dir = (REPOS[case.repo] / GATE_TESTS).resolve()
     path = (tests_dir / f"test_{case.op_file}.py").resolve()
     if tests_dir not in path.parents or not path.is_file():
         return None
     name = f"test_{case.op}"
-    names = _test_functions(path)
-    picked = [name] if name in names else [n for n in names if name in n]
+    nodes = _test_functions(path)
+    leaves = [(node, accuracy_hints.node_leaf(node)) for node in nodes]
+    picked = [node for node, leaf in leaves if leaf == name] or \
+             [node for node, leaf in leaves if name in leaf]
     if not picked:
         return None
     shown = f"{GATE_TESTS}/test_{case.op_file}.py"
-    return " ".join(f"{shown}::{n}" for n in picked)
+    return " ".join(f"{shown}::{node}" for node in picked)
 
 
 def test_target(case: run_batch.Case,
@@ -567,7 +573,29 @@ def accuracy_gate(cases: List[run_batch.Case], args: argparse.Namespace,
     if skipped:
         print(f"{LOG} {len(skipped)} ops skipped by the accuracy gate (recorded in ab.json)",
               flush=True)
+    write_no_test_hints(args.out, cases, gate)
     return [c for c in cases if f"{c.repo}/{c.run_name}" not in skipped], skipped
+
+
+def write_no_test_hints(out: Path, cases: List[run_batch.Case],
+                        gate: Dict[str, Dict[str, Dict[str, str]]]) -> None:
+    """Write what the gate could not test, plus where in tests/ it might be.
+
+    A no_test op has no accuracy evidence, and the missing ones are exactly what
+    --accuracy-map is for: accuracy_hints.py searches both checkouts and leaves
+    <out>/accuracy_no_test.md and <out>/accuracy_map.suggested.txt. The whole gate
+    record is used, not just this invocation's cases, so a resume that re-ran one op
+    does not drop the others; the files are rewritten even when nothing is left. A
+    report that fails must not take the A/B down with it, so this only prints."""
+    try:
+        md, draft, count = accuracy_hints.write_from_gate(out, cases, gate)
+    except Exception as exc:  # a hint file is not worth failing the run over
+        print(f"{LOG} accuracy hints failed: {exc}", flush=True)
+        return
+    if count:
+        print(f"{LOG} {count} ops without a test: {md.name} and {draft.name}", flush=True)
+    else:
+        print(f"{LOG} every op has a test: {md.name} rewritten empty", flush=True)
 
 
 # ---------------- rounds and cost ----------------
