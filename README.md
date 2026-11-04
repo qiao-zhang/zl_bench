@@ -249,6 +249,34 @@ python rlc_report.py --csv runs/ab/rows.csv --gate runs/gate \
 
 For side B (RLC on), besides `--b-env FLAGTREE_RLC_ENHANCE=1`, note FlagTree's four RLC sub-switches: `enable-rlc-enhance-cost-based`, `enable-rlc-enhance-backward-propagation`, `enable-rlc-enhance-small-component-solving` and `enable-rlc-enhance-store-layout-rematerialization` all default to on (`python/src/passes.cc`), and since FlagTree commit `17288c4b4` ("enable rlc enhance for ppu", 2026-10-26) the PPU backend passes `knobs.ppu.rlc_enhance` together with `enable_rlc_enhance_store_layout_remat=True` at its three `add_remove_layout_conversions` call sites in `third_party/ppu/backend/compiler.py` — side B therefore runs with **all 5 switches**. An older build that still hard-coded `False` there would run 4 of 5, so check the installed tree before recording. The sub-switches only take effect when the build defines `__FLAGTREE_RLC_ENHANCE__` (added for `FLAGTREE_BACKEND=ppu` in `cmake/FlagTreeOptions.cmake` by the same commit, and set as the default of `ppu_knobs.rlc_enhance`); without that macro `passes.cc` drops every argument and RLC never engages, which would make both sides compile to the same binary.
 
+### Archiving the evidence for analysis
+
+Once the AB run and its report are done, `ab_archive.py` copies the evidence of the selected ops
+into one folder, keeping the original layout:
+
+```bash
+python ab_archive.py \
+  --root runs/ppu/exp --ab-dir runs/ppu/exp/ab --record runs/ppu/exp/base \
+  --gate runs/ppu/exp/gate \
+  --csv runs/ppu/exp/ab/rows.csv --xlsx rlc_report.xlsx \
+  --ops main:chunk_kda vllm:per_token_group_quant \
+  --out runs/ppu/analysis --dry-run
+```
+
+- Directory products (record, every AB round, the accuracy gate, the compile gate) keep their path
+  below `--root`; the CSV/XLSX go to `reports/`, the only layout exception. Skip `--gate` when the
+  experiment never ran one.
+- Op specs are the ones `run_batch.py` takes (`[repo:]op[@op_file]`, repo defaults to `main`), but
+  only ops that left a round or an accuracy record under `--ab-dir` are accepted; disambiguate
+  duplicate op names with `@op_file`.
+- `--dry-run` validates and prints the plan only. A real run copies into a sibling staging directory
+  and renames it into place; a failed pack stays in staging and the same command can be retried.
+  `--fail-on-missing` exits 3 when the archive completed but evidence was missing.
+- The pack contains `archive_manifest.json` (evidence roots, report SHA256, missing items) and
+  `ARCHIVE_README.txt`; the manifest aggregates per evidence root unless `--manifest-detail=files`.
+- CSV/XLSX must already exist (`ab_compare.py --csv`, `rlc_report.py`); the tool neither regenerates
+  reports nor explains why an op got faster or slower.
+
 ### Faster sweeps on multiple GPUs
 
 With many shapes, most of the wall time goes to the autotune sweep rather than the measurement. `PARALLEL_WARMUP_GPUS=N` runs the sweep on N GPUs and then measures serially on one GPU as usual:

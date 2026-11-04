@@ -246,6 +246,31 @@ python rlc_report.py --csv runs/ab/rows.csv --gate runs/gate \
 
 B 侧（开启 RLC）除了 `--b-env FLAGTREE_RLC_ENHANCE=1`，还要注意 FlagTree 的四个 RLC 子开关：`enable-rlc-enhance-cost-based`、`enable-rlc-enhance-backward-propagation`、`enable-rlc-enhance-small-component-solving`、`enable-rlc-enhance-store-layout-rematerialization` 在 `python/src/passes.cc` 里默认都是 `True`；并且自 FlagTree commit `17288c4b4`（`enable rlc enhance for ppu`，2026-10-26）起，PPU 后端 `third_party/ppu/backend/compiler.py` 三处 `add_remove_layout_conversions` 都传 `knobs.ppu.rlc_enhance` 和 `enable_rlc_enhance_store_layout_remat=True`，所以 B 侧是**5/5 全开**。若安装的构建仍把这三处硬编码成 `False`，B 侧只生效 4/5，结论须注明这一口径，录制前先核对源码。四个子开关只有在构建时定义了 `__FLAGTREE_RLC_ENHANCE__` 时才生效（同一 commit 在 `cmake/FlagTreeOptions.cmake` 里为 `FLAGTREE_BACKEND=ppu` 加上该宏，同时 `ppu_knobs.rlc_enhance` 以它为默认值）；缺这个宏时 `passes.cc` 会丢弃全部参数、RLC 完全不生效，A/B 两侧会编出同一份二进制。
 
+### 归档分析证据
+
+一次 AB 和汇报都跑完后，`ab_archive.py` 把指定算子的已有证据按原目录结构拷到一个文件夹，
+便于集中分析或分享：
+
+```bash
+python ab_archive.py \
+  --root runs/ppu/exp --ab-dir runs/ppu/exp/ab --record runs/ppu/exp/base \
+  --gate runs/ppu/exp/gate \
+  --csv runs/ppu/exp/ab/rows.csv --xlsx rlc_report.xlsx \
+  --ops main:chunk_kda vllm:per_token_group_quant \
+  --out runs/ppu/analysis --dry-run
+```
+
+- 目录产物（record、AB 各轮、精度门禁、编译 gate）保留相对 `--root` 的路径；CSV/XLSX 统一放进
+  `reports/`，这是唯一的布局例外。没跑门控时不传 `--gate` 即可。
+- 算子写法与 `run_batch.py` 相同（`[repo:]op[@op_file]`，无前缀默认 `main`），但只接受本次
+  `--ab-dir` 里留有轮次或精度记录的算子；同仓库重名要写 `@op_file`。
+- `--dry-run` 只校验并打印复制计划。正式运行先在同级临时目录复制，成功后才整体 rename 发布；
+  失败包留在 staging，可直接重试同一目标。`--fail-on-missing` 让“完成但有缺失”退出 3。
+- 归档里会生成 `archive_manifest.json`（证据根、汇报 SHA256、缺失项）和 `ARCHIVE_README.txt`；
+  默认清单按证据根聚合，加 `--manifest-detail=files` 才逐文件记录。
+- 前置条件是 CSV/XLSX 已生成（`ab_compare.py --csv` 与 `rlc_report.py`）。归档不重新生成汇报，
+  也不解释优化/劣化的原因。
+
 ### 多卡加速 sweep
 
 shape 多时，墙上时间主要花在 autotune sweep 而不是测量上。`PARALLEL_WARMUP_GPUS=N` 让 sweep 在 N 张卡上并行，之后照常在一张卡上串行测量：
