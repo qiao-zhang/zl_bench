@@ -226,6 +226,15 @@ python run_batch.py --ops-file my_ops.txt --env FLAGTREE_XXX=1
 
 **全量参考**（[测试版本](#测试版本)，7×H20，`--dtypes bfloat16`，单 shape 集）：`--all` 选出 1608 个算子，约 2.5 小时，每算子中位 12 秒（主要是进程启动与 import）。PASS 1529、SKIP 43，其余 36 个因上游或环境问题失败，已列入 `ops/dismiss.txt`。SKIP 都是上游 skipif（缺 TransformerEngine 或 vLLM 参考实现、只支持其他厂商或架构）。多 shape 集上（275 个算子，`--dtypes "bfloat16 float16"`）每个算子中位约一分钟，record 模式下最长要两小时（`chunk_gdn2`），所以要设 `--op-timeout 7200`。
 
+**批次跑完后先做归因。** `triage_report.py` 只读批次目录里的 `ops_status.csv` 和各算子的 `run.log`，把 SKIP/FAIL 归到根因类别并生成可归档的报告，不调用 `nvidia-smi` / `ppu-smi` / `mx-smi`，因此同一份批次在 NVIDIA、PPU、MetaX 上结论一致：
+
+```bash
+python triage_report.py runs/batch_xxx          # -> triage.md + triage.csv
+python triage_report.py runs/batch_xxx --top 5 --dismiss-out /tmp/dismiss_candidate.txt
+```
+
+报告把 138 个 FAIL 归成十几个类别，每组给出建议动作（提 issue / 调 config / 补环境 / 上游问题 / dismiss）、样例的完整异常块和一条复现命令，第 5 节直接给出可粘贴的 `ops/dismiss.txt` 候选块。详见 [docs/triage.zh-CN.md](docs/triage.zh-CN.md)。
+
 ### 指定算子清单与 xlsx 报告
 
 当工作对象是固定的一张算子表（例如手工维护的对比表）时，把表存成 CSV，生成一次 ops 文件，后续每一步都用它：
@@ -419,6 +428,7 @@ ab_stats.py         判定规则与 Mann-Whitney 检验
 ir_gate.py          编译差异门控
 gen_inventory.py    算子清单与 shape 集刷新
 batch_summary.py    run.log 解析与 summary.csv
+triage_report.py    批次 SKIP/FAIL 归因与报告（triage.md / triage.csv）
 _*_plugin.py        pytest 插件；_fg_benchmark.py、_term_style.py、_timing_scope.py 为共用模块
 ops/                算子清单与批量排除清单
 shape/              shape 集

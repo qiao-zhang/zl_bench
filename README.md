@@ -229,6 +229,15 @@ python run_batch.py --ops-file my_ops.txt --env FLAGTREE_XXX=1
 
 **Reference full run** ([tested versions](#tested-versions), 7×H20, `--dtypes bfloat16`, single-shape set): `--all` selects 1608 ops and takes about 2.5 hours, 12 s per op at the median (mostly process start and imports). PASS 1529, SKIP 43; the other 36 fail for upstream or environment reasons and are listed in `ops/dismiss.txt`. Every SKIP is an upstream skipif (a missing TransformerEngine or vLLM reference, another vendor or architecture). On the multi-shape set (275 ops, `--dtypes "bfloat16 float16"`) an op takes about a minute at the median and up to two hours in record mode (`chunk_gdn2`), so give it `--op-timeout 7200`.
 
+**Attribute the batch's failures before anything else.** `triage_report.py` reads only what the batch dir already holds (`ops_status.csv` plus each op's `run.log`), groups the SKIP/FAIL ops by root cause and writes a report you can archive. It never calls `nvidia-smi` / `ppu-smi` / `mx-smi`, so the same batch gives the same verdicts on NVIDIA, PPU and MetaX:
+
+```bash
+python triage_report.py runs/batch_xxx          # -> triage.md + triage.csv
+python triage_report.py runs/batch_xxx --top 5 --dismiss-out /tmp/dismiss_candidate.txt
+```
+
+138 FAILs collapse into a dozen categories; each group carries a suggested action (file an issue / adjust the config / fix the environment / upstream code / dismiss), the sample's full exception block and a repro command, and section 5 is a paste-ready `ops/dismiss.txt` candidate block. See [docs/triage.zh-CN.md](docs/triage.zh-CN.md) (Chinese).
+
 ### A fixed op list and an xlsx report
 
 When the work is a fixed list of ops (for example the rows of a hand-made comparison table), turn the table's CSV into an ops file once and pass it to every stage:
@@ -425,6 +434,7 @@ ab_stats.py         verdict rule and Mann-Whitney test
 ir_gate.py          compile-diff gate
 gen_inventory.py    op inventory and shape-set refresh
 batch_summary.py    run.log parsing and summary.csv
+triage_report.py    SKIP/FAIL attribution and report (triage.md / triage.csv)
 _*_plugin.py        pytest plugins; _fg_benchmark.py, _term_style.py and _timing_scope.py are shared helpers
 ops/                op inventories and the batch exclusion list
 shape/              shape sets
