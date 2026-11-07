@@ -58,12 +58,12 @@ zl_bench 会 monkeypatch 上游内部实现，可用性与测试时的上游版�
 
 ## 环境要求
 
-- NVIDIA GPU（在 H20 / Hopper 上开发和测试）、平头哥 PPU（真武 810E）或沐曦 MetaX GPU（C550 / C500）；后两者由 FlagTree 的 `ppu`、`metax` 后端和 FlagGems 的 `thead`、`metax` vendor 支持，对 PyTorch 而言仍是 `torch.cuda` 接口
+- NVIDIA GPU（在 H20 / Hopper 上开发和测试）、平头哥 PPU（真武 810E）、沐曦 MetaX GPU（C550 / C500）或海光 HCU；后三者由 FlagTree 的 `ppu`、`metax`、`hcu` 后端和 FlagGems 的 `thead`、`metax`、`hygon` vendor 支持，对 PyTorch 而言仍是 `torch.cuda` 接口
 - Python 3.10+ 与 PyTorch
 - FlagTree 构建的 Triton 3.6（插件用到 `knobs.compilation.listener` 和 kernel launch 钩子）
 - FlagGems 和/或 FlagGems-vllm 的源码
 
-在 PPU 和 MetaX 上，卡号与空闲检查改用各自的设备管理工具（`ppu-smi`、`mx-smi`）而不是 `nvidia-smi`；`ZL_BENCH_SMI` 可覆盖其中任何一个，全都没有时批次按单卡处理，除非显式给 `--gpus`。工具按环境里的厂商软件栈选择（`PPU_SDK` → `ppu-smi`，`MACA_PATH` → `mx-smi`），所以那些列不出本厂卡的 `nvidia-smi` 不会仅因为装了就被选中；栈一旦确定就只用本厂工具，本厂工具没装时不检查空闲并给出警告（不回退到别厂工具），也可以用 `ZL_BENCH_SMI` 指定。`--env` 传进来的厂商栈同样作用于设备枚举与空闲检查，设备管理工具本身也在这一份环境下执行（`--env PATH=...` / `LD_LIBRARY_PATH=...` 提供的工具能真正跑起来）；`ab_run.py` 按每一侧自己的 `--a-env` / `--b-env` 检查，两侧栈不同会告警，不给 `--gpus` 时也按两侧环境自动枚举卡，两侧看到的卡集合不一致就报错（`MACA_VISIBLE_DEVICES=2,3` 与 `3,2` 是同一批卡，顺序不同不影响；用 `--gpus` 可显式指定）。MetaX 上默认卡列表也认 `MACA_VISIBLE_DEVICES`，并且每个算子启动时都把 `MACA_VISIBLE_DEVICES` 设成它自己那张卡，MACA 运行时就不会读到调用方的 mask 而不是批次的分片。编译 diff gate 比较后端最终的二进制阶段：PPU 是 `hgbin`，MetaX 是 `mcfatbin`，NVIDIA 是 `cubin`。CUDA graph 计时仍然逐次测量尝试：捕获不了的算子回退到 `do_bench`，日志里留 `BENCHMARK_DIRECT_NO_CUDAGRAPH` 标记；平台完全没有 graph 接口时，该算子余下的 shape 直接跳过尝试；会让进程崩溃的 capture 用 `NO_CUDAGRAPH_OPS` 按名字排除。算子清单和 `ops/dismiss.txt` 是在 NVIDIA 上生成的，PPU 或 MetaX 机器上要用 `gen_inventory.py` 重建。
+在 PPU、MetaX 和 HCU 上，卡号与空闲检查改用各自的设备管理工具（`ppu-smi`、`mx-smi`、`hy-smi`）而不是 `nvidia-smi`；`ZL_BENCH_SMI` 可覆盖其中任何一个，全都没有时批次按单卡处理，除非显式给 `--gpus`。工具按环境里的厂商软件栈选择（`PPU_SDK` → `ppu-smi`，`MACA_PATH` → `mx-smi`），所以那些列不出本厂卡的 `nvidia-smi` 不会仅因为装了就被选中；HCU 没有专属的栈标记（FlagTree 的 `hcu` 后端只用 `HIP_PATH` / `ROCM_PATH`，与 AMD 重叠），所以 `hy-smi` 由 `ZL_BENCH_SMI` 或工具兜底表选中，并按它自己的方言查询（设备用 `-i --showid`，占用用 `--showmemuse --csv` 的百分比）；栈一旦确定就只用本厂工具，本厂工具没装时不检查空闲并给出警告（不回退到别厂工具），也可以用 `ZL_BENCH_SMI` 指定。`--env` 传进来的厂商栈同样作用于设备枚举与空闲检查，设备管理工具本身也在这一份环境下执行（`--env PATH=...` / `LD_LIBRARY_PATH=...` 提供的工具能真正跑起来）；`ab_run.py` 按每一侧自己的 `--a-env` / `--b-env` 检查，两侧栈不同会告警，不给 `--gpus` 时也按两侧环境自动枚举卡，两侧看到的卡集合不一致就报错（`MACA_VISIBLE_DEVICES=2,3` 与 `3,2` 是同一批卡，顺序不同不影响；用 `--gpus` 可显式指定）。MetaX 上默认卡列表也认 `MACA_VISIBLE_DEVICES`，并且每个算子启动时都把 `MACA_VISIBLE_DEVICES` 设成它自己那张卡，MACA 运行时就不会读到调用方的 mask 而不是批次的分片。编译 diff gate 比较后端最终的二进制阶段：PPU 是 `hgbin`，MetaX 是 `mcfatbin`，NVIDIA 是 `cubin`。CUDA graph 计时仍然逐次测量尝试：捕获不了的算子回退到 `do_bench`，日志里留 `BENCHMARK_DIRECT_NO_CUDAGRAPH` 标记；平台完全没有 graph 接口时，该算子余下的 shape 直接跳过尝试；会让进程崩溃的 capture 用 `NO_CUDAGRAPH_OPS` 按名字排除。算子清单和 `ops/dismiss.txt` 是在 NVIDIA 上生成的，PPU 或 MetaX 机器上要用 `gen_inventory.py` 重建。
 
 ## 安装
 

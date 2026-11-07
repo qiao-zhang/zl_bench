@@ -75,7 +75,7 @@ BUSY_REPORT_S = 300
 # overrides the choice, for a box where several are installed or the tool has
 # another name.
 SMI_ENV = "ZL_BENCH_SMI"
-SMI_TOOLS = ("nvidia-smi", "ppu-smi", "mx-smi")
+SMI_TOOLS = ("nvidia-smi", "ppu-smi", "mx-smi", "hy-smi")
 # The tool that ships with each vendor stack (see accelerator()). A box often
 # carries an nvidia-smi that cannot enumerate the devices of another vendor, so
 # the stack is the stronger signal than the tool order.
@@ -352,6 +352,10 @@ def visible_gpus(arg: Optional[str],
         value = env.get(key, "").strip()
         if value:
             return [g.strip() for g in value.split(",") if g.strip()]
+    if smi_name(smi_tool(op_env(env))) == "hy-smi":
+        # Without this the listing below finds nothing and the batch runs on card
+        # 0 only; hy-smi lists its devices with `-i --showid`.
+        return _hy_smi_device_list(env) or ["0"]
     # -L lists devices on nvidia-smi/ppu-smi; mx-smi answers in its own spelling
     # per MACA release, so fall back to its summary block.
     n = _device_count(_smi_first(SMI_LIST_ARGS, env=env) or _smi([], env=env) or "")
@@ -512,6 +516,60 @@ def _mx_smi_gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optiona
     return procs
 
 
+# ------------------------------------------------ hy-smi (HCU)
+#
+# hy-smi speaks the rocm-smi dialect: no `-L`, no `--query-gpu=`, and only some
+# subcommands honour `--csv`. Two of them are enough for the idle check:
+#   hy-smi -i --showid          -> `HCU[0]		: Device ID: 0x6320` per device
+#   hy-smi --showmemuse --csv   -> `device,HCU memory use (%)` then `card0,0`
+# `--showpids` lists KFD PIDs but rejects `--csv` and does not map a PID to a
+# card in any documented spelling, so usage is read from the VRAM percentage.
+HY_ID_ARGS = (["-i", "--showid"],)
+HY_MEM_ARGS = (["--showmemuse", "--csv"],)
+_HY_ID_RE = re.compile(r"^\s*HCU\[(\d+)\]", re.MULTILINE)
+_HY_MEM_RE = re.compile(r"^\s*card(\d+)\s*,\s*(?P<pct>\d+(?:\.\d+)?)\s*$", re.MULTILINE)
+# hy-smi reports VRAM as a percentage of the card, where nvidia-smi reports MiB,
+# so the idle threshold is a percentage: BUSY_MEMORY_MIB (1 GiB) is ~1.6% of a
+# 64 GB card. Rounded down to 1% it deliberately errs towards "idle" only for a
+# sub-1% neighbour that hy-smi would not have listed as a process anyway.
+HY_BUSY_PERCENT = 1
+
+
+def parse_hy_ids(text: str) -> List[str]:
+    """`hy-smi -i --showid` -> device indices in listing order."""
+    return _HY_ID_RE.findall(text)
+
+
+def parse_hy_memory(text: str) -> Dict[str, float]:
+    """`hy-smi --showmemuse --csv` -> {device index: percent of VRAM in use}."""
+    return {m.group(1): float(m.group("pct")) for m in _HY_MEM_RE.finditer(text)}
+
+
+def _hy_smi_device_list(env: Optional[Dict[str, str]] = None) -> List[str]:
+    """Device indices when hy-smi can enumerate them.
+
+    Worth the extra query: without it visible_gpus() falls back to ["0"] and the
+    whole batch runs on one device."""
+    text = _smi_first(HY_ID_ARGS, env=env)
+    return parse_hy_ids(text) if text else []
+
+
+def _hy_smi_gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
+    """gpu_users for hy-smi, from the VRAM percentage of that one card.
+
+    Coarser than the NVIDIA/MetaX paths (no per-process detail), but it still
+    separates an idle card from one a neighbour is using -- which is what the
+    check exists for. None (tool cannot tell) rather than [] when the card is
+    missing from the answer, so an unexpected layout never reads as "idle"."""
+    memory = _smi_first(HY_MEM_ARGS, env=env)
+    if memory is None:
+        return None
+    used = parse_hy_memory(memory).get(gpu)
+    if used is None:
+        return None
+    return [] if used < HY_BUSY_PERCENT else [f"{used:g}% VRAM in use"]
+
+
 def gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
     """What is using gpu (a management-tool index or a GPU uuid): its processes, or
     the memory in use when no process is listed; empty when idle, None if the tool
@@ -519,6 +577,10 @@ def gpu_users(gpu: str, env: Optional[Dict[str, str]] = None) -> Optional[List[s
     if smi_name(smi_tool(op_env(env))) == "mx-smi":
         # mx-smi speaks none of the --query-* spellings below.
         return _mx_smi_gpu_users(gpu, env)
+    if smi_name(smi_tool(op_env(env))) == "hy-smi":
+        # hy-smi speaks none of them either (rocm-smi dialect); it answers with a
+        # VRAM percentage per card via --showmemuse --csv.
+        return _hy_smi_gpu_users(gpu, env)
     gpus = _smi_first(SMI_GPU_ARGS, csv_query=True, env=env)
     apps = _smi_first(SMI_APPS_ARGS, csv_query=True, env=env)
     info = parse_gpus(gpus).get(gpu) if gpus else None
@@ -538,7 +600,9 @@ def _no_smi_reason(env: Optional[Dict[str, str]] = None) -> str:
     """Why the device query is impossible, for the one warning the batch prints."""
     tool = smi_tool(env)
     if tool is not None:
-        tried = ("-L/--show-memory/--show-all-process" if smi_name(tool) == "mx-smi"
+        name = smi_name(tool)
+        tried = ("-L/--show-memory/--show-all-process" if name == "mx-smi"
+                 else "--showmemuse --csv" if name == "hy-smi"
                  else "-L/--query-ppu/--query-gpu and their compute-apps forms")
         return f"{tool} cannot list GPU processes (tried {tried})"
     vendor = accelerator(env)
@@ -548,8 +612,8 @@ def _no_smi_reason(env: Optional[Dict[str, str]] = None) -> str:
         # tool would inspect the wrong devices.
         return (f"the {vendor} stack is in use but {expected} is not installed "
                 f"(install it or set {SMI_ENV})")
-    return (f"no accelerator management tool (install nvidia-smi, ppu-smi or mx-smi, "
-            f"or set {SMI_ENV})")
+    return (f"no accelerator management tool (install nvidia-smi, ppu-smi, mx-smi "
+            f"or hy-smi, or set {SMI_ENV})")
 
 
 def wait_for_idle_gpu(gpu: str, policy: str,

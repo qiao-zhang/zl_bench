@@ -407,7 +407,7 @@ def test_visible_gpus_reads_the_mx_smi_summary(monkeypatch):
     its `Attached GPUs: N` line (the field FlagGems' gpu_check_metax.sh reads)."""
     monkeypatch.delenv("MACA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(run_batch, "smi_tool", lambda: "mx-smi")
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "mx-smi")
     monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: MACA_SUMMARY if not args else None)
     assert run_batch.visible_gpus(None) == [str(i) for i in range(8)]
 
@@ -551,3 +551,66 @@ def test_run_case_checks_idle_with_the_merged_env(monkeypatch, tmp_path):
     run_batch.run_case(case, tmp_path, "0", args)
     assert seen["env"]["MACA_PATH"] == "/opt/maca"
     assert run_batch.accelerator(seen["env"]) == "metax"
+
+
+# Real `hy-smi` (C-3000 HCU) output. It speaks the rocm-smi dialect: no `-L`, no
+# `--query-gpu=`, and `--showpids` rejects `--csv`, so the idle check reads VRAM
+# percentage instead of MiB.
+HY_SHOWID = (
+    "\n================================= System Management Interface ==================================\n"
+    "================================================================================================\n"
+    "HCU[0]\t\t: Device ID: 0x6320\n"
+    "HCU[1]\t\t: Device ID: 0x6320\n"
+    "HCU[7]\t\t: Device ID: 0x6320\n"
+    "================================================================================================\n"
+    "======================================== End of SMI Log ========================================\n"
+)
+HY_MEM_CSV = (
+    "device,HCU memory use (%)\n"
+    "card0,3\n"
+    "card1,0\n"
+    "card7,12.5\n"
+)
+
+
+def test_hy_id_and_memory_parsing():
+    assert run_batch.parse_hy_ids(HY_SHOWID) == ["0", "1", "7"]
+    assert run_batch.parse_hy_memory(HY_MEM_CSV) == {"0": 3.0, "1": 0.0, "7": 12.5}
+
+
+def test_hy_smi_visible_gpus_enumerates_every_card(monkeypatch):
+    """hy-smi writes `0   51.0C ...`, not `GPU 0: ...`, so the generic listing finds
+    nothing and the batch would run on card 0 only."""
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "hy-smi")
+    monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: HY_SHOWID)
+    assert run_batch.visible_gpus(None, {}) == ["0", "1", "7"]
+
+
+def test_hy_smi_gpu_users_reads_the_vram_percentage(monkeypatch):
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "hy-smi")
+    monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: HY_MEM_CSV)
+    assert run_batch.gpu_users("1") == []  # 0% is idle
+    assert run_batch.gpu_users("0") == ["3% VRAM in use"]
+    assert run_batch.gpu_users("7") == ["12.5% VRAM in use"]
+    assert run_batch.gpu_users("9") is None  # card missing from the answer
+
+
+def test_hy_smi_gpu_users_is_unknown_when_the_query_fails(monkeypatch):
+    """A failed query must not read as "idle": the caller skips the check instead
+    of measuring next to a neighbour."""
+    monkeypatch.setattr(run_batch, "smi_tool", lambda env=None: "hy-smi")
+    monkeypatch.setattr(run_batch, "_smi", lambda args, env=None: None)
+    assert run_batch.gpu_users("0") is None
+
+
+def test_no_smi_reason_names_the_hy_smi_spelling():
+    reason = run_batch._no_smi_reason({"ZL_BENCH_SMI": "hy-smi"})
+    assert "--showmemuse --csv" in reason
+
+
+def test_smi_tool_falls_back_to_hy_smi(monkeypatch):
+    """hy-smi is in the fallback list, so a box with no other tool still gets an
+    idle check without ZL_BENCH_SMI."""
+    monkeypatch.setattr(run_batch.shutil, "which",
+                        lambda name, path=None: "/usr/bin/hy-smi" if name == "hy-smi" else None)
+    assert run_batch.smi_tool({}) == "hy-smi"
