@@ -21,6 +21,8 @@ per-row verdicts.
   python ab_run.py ... --out runs/ab_x --until-decided --max-rounds 14
   # fresh rounds for an independent check (judge them with ab_compare.py --rounds)
   python ab_run.py ... --out runs/ab_x --ops-file recheck.txt --add-rounds 6
+  # a window of a long list file: ops 41..80 (past the end it stops at the last op)
+  python ab_run.py ... --ops-file ops/key_ops.txt --start 41 --num 40 --out runs/ab_x
 
   # same, but run each side's unit test first and skip the ops it fails
   python ab_run.py ... --accuracy-gate --out runs/ab_x
@@ -40,8 +42,8 @@ ops the automatic lookup cannot find (its test function may carry any name), one
 `[repo:]op[@op_file] tests/...py[::test_func]` per line. The outcome, including why
 an op was skipped, goes to ab.json and into ab_compare.py's report; the no_test ops
 are searched for in both checkouts, and the candidates written to
-<out>/accuracy_no_test.md and <out>/accuracy_map.suggested.txt (a commented
---accuracy-map draft) -- see accuracy_hints.py.
+<out>/accuracy_no_test.md and <out>/accuracy_map.suggested.txt (an --accuracy-map
+draft: `###` prose, one `#` per candidate line) -- see accuracy_hints.py.
 """
 
 from __future__ import annotations
@@ -76,6 +78,15 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     run_batch.add_selection_args(p)
+    w = p.add_argument_group("op window")
+    w.add_argument("--start", type=int, default=1, metavar="NUM1",
+                   help="run from the NUM1th op of the selected list on, 1-based (default "
+                        "%(default)s); --ops-file's blank and '#' lines are not op entries, "
+                        "so they are not counted")
+    w.add_argument("--num", type=int, default=0, metavar="NUM2",
+                   help="run NUM2 ops from --start (default %(default)s = to the end of the "
+                        "list); a window that runs past the end stops at the last op with a "
+                        "note")
     s = p.add_argument_group("sides")
     s.add_argument("--record", type=Path, required=True,
                    help="record to replay: a run_batch.py batch dir, or a single-op run dir")
@@ -143,6 +154,7 @@ def parse_args() -> argparse.Namespace:
 
     if args.add_rounds and args.until_decided:
         raise SystemExit(f"{LOG} --add-rounds and --until-decided do not mix: run them one after the other")
+    apply_op_window(args)
     args.record = args.record.resolve()
     if not args.record.is_dir():
         raise SystemExit(f"{LOG} no record dir {args.record}")
@@ -178,6 +190,65 @@ def side_stacks(sides: Dict[str, dict]) -> Dict[str, str]:
     that sets MACA_PATH / PPU_SDK is checked with its own vendor's tool."""
     return {side: run_batch.accelerator(run_batch.op_env(cfg["env"])) or ""
             for side, cfg in sides.items()}
+
+
+# ---------------- op window ----------------
+
+def op_specs(args: argparse.Namespace) -> List[str]:
+    """The selected op list as run_batch.resolve_selection reads it: --ops first, then
+    --ops-file's lines, with blank and '#' lines dropped."""
+    specs: List[str] = list(args.ops or [])
+    if args.ops_file:
+        for line in args.ops_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                specs.append(line)
+    return specs
+
+
+def op_window(specs: List[str], start: int, num: int) -> List[str]:
+    """ops[start-1 : start-1+num]: the --start/--num window of the list, 1-based.
+
+    A window that reaches past the end of the list is not an error -- `--start 40
+    --num 10` on a 45-op file runs the 6 ops that are there -- it is noted on one
+    line so a shortened run does not go unnoticed."""
+    if start < 1:
+        raise SystemExit(f"{LOG} --start is 1-based, got {start}")
+    if num < 0:
+        raise SystemExit(f"{LOG} --num must not be negative, got {num}")
+    first = start - 1
+    if first >= len(specs):
+        print(f"{LOG} --start {start} is past the {len(specs)}-op list: nothing to run",
+              flush=True)
+        return []
+    take = num or len(specs) - first      # --num 0: to the end of the list
+    end = first + take
+    if end > len(specs):
+        print(f"{LOG} --start {start} --num {take} runs past the end of the {len(specs)}-op "
+              f"list: running ops {start}..{len(specs)}, {len(specs) - first} of {take}",
+              flush=True)
+    return specs[first:end]
+
+
+def apply_op_window(args: argparse.Namespace) -> None:
+    """Cut the selection down to --start/--num, before resolve_selection reads it.
+
+    The window counts the op list as the resolved selection sees it (--ops then
+    --ops-file, blank and '#' lines skipped), so it means the same thing either way
+    the ops were named. Both flags default to the whole list, so a run that passes
+    neither is untouched."""
+    if args.all:
+        if args.start != 1 or args.num:
+            raise SystemExit(f"{LOG} --start/--num window --ops/--ops-file; --all has no list "
+                             "to count, use --repos or a list file")
+        return
+    if args.start == 1 and not args.num:
+        return
+    specs = op_specs(args)
+    window = op_window(specs, args.start, args.num)
+    if not window:
+        sys.exit(0)                      # noted by op_window, nothing left to run
+    args.ops, args.ops_file = window, None
 
 
 # ---------------- manifest ----------------

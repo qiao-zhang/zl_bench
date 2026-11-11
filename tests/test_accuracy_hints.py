@@ -771,7 +771,8 @@ def _entry(run="main/kda", repo="main", op="kda", op_file="kda", sides=None, hin
 
 def test_write_reports_lists_the_ops_and_keeps_the_draft_commented(tmp_path):
     """The draft must be usable: every candidate line commented, so a wrong guess never
-    reaches --accuracy-map by accident."""
+    reaches --accuracy-map by accident; prose is `###`, so the only lines one `#` away
+    from being an entry are the candidates."""
     hint = accuracy_hints.Hint(1, "同名文件", "tests/test_kda.py::test_kda_gate",
                                "同名文件存在，但没有 `test_kda`")
     entries = [_entry(hints=[hint]), _entry(run="vllm/empty", repo="vllm",
@@ -786,8 +787,41 @@ def test_write_reports_lists_the_ops_and_keeps_the_draft_commented(tmp_path):
     draft = map_path.read_text(encoding="utf-8")
     body = [line for line in draft.splitlines() if line and not line.startswith("#")]
     assert body == []                                   # nothing to paste by accident
-    assert "# main:kda@kda tests/test_kda.py::test_kda_gate" in draft
+    candidates = [line for line in draft.splitlines()
+                  if line.startswith("#") and not line.startswith("###")]
+    assert candidates == ["# main:kda@kda tests/test_kda.py::test_kda_gate"]
+    # 每一行不是空行、不是候选行，就是 `###` 说明行：没有第三种形态。
+    assert all(line.startswith("###") for line in draft.splitlines()
+               if line and line not in candidates)
     assert "每个算子只留一行" in draft
+
+
+def test_one_hash_is_the_candidate_and_two_are_prose(tmp_path, monkeypatch):
+    """The two-level comment is what makes "delete the `#`" safe: a candidate line one
+    `#` short is a map entry --accuracy-map accepts, a prose line one `#` short is
+    still `##...` and stays a comment."""
+    root = _checkout(tmp_path)
+    _write(root, "test_kda.py", "def test_kda_gate():\n    pass\n")
+    monkeypatch.setitem(accuracy_hints.REPOS, "main", root)
+    monkeypatch.setitem(ab_run.REPOS, "main", root)
+    hint = accuracy_hints.Hint(1, "同名文件", "tests/test_kda.py::test_kda_gate",
+                               "同名文件存在，但没有 `test_kda`")
+    _, map_path = accuracy_hints.write_reports(tmp_path / "out", [_entry(hints=[hint])])
+    lines = [line for line in map_path.read_text(encoding="utf-8").splitlines() if line]
+    candidates = [line for line in lines
+                  if line.startswith("#") and not line.startswith("###")]
+    prose = [line for line in lines if line.startswith("###")]
+    assert candidates and prose
+
+    enabled = tmp_path / "map.txt"
+    enabled.write_text("\n".join(line[1:] for line in candidates) + "\n", encoding="utf-8")
+    assert ab_run.load_accuracy_map(enabled) == {
+        ("main", "kda", "kda"): "tests/test_kda.py::test_kda_gate"}
+
+    shortened = tmp_path / "prose.txt"
+    shortened.write_text("\n".join(line[1:] for line in prose) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="names no op"):
+        ab_run.load_accuracy_map(shortened)
 
 
 def test_write_from_gate_writes_both_files_and_returns_the_count(tmp_path, monkeypatch):

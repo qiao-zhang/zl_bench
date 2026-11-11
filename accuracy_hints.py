@@ -8,7 +8,8 @@ the test function), and finding the missing ones means searching two checkouts. 
 module does that search and writes what it found next to the A/B output:
 
   accuracy_no_test.md          what the gate could not test, and where to look
-  accuracy_map.suggested.txt   the same candidates in --accuracy-map form, commented
+  accuracy_map.suggested.txt   the same candidates in --accuracy-map form, `###` prose
+                               and one `#` per candidate line (delete that `#` to use it)
 
 A candidate is a `tests/...py[::test_func]` target, tagged by how it was matched:
 
@@ -22,7 +23,8 @@ A candidate is a `tests/...py[::test_func]` target, tagged by how it was matched
 
 None of it is a decision: a wrong target fails the op, or gates it with a test that
 does not cover it -- which is why every line says how it was matched and the draft
-keeps them all commented, one per op to uncomment.
+keeps every candidate commented, one per op to uncomment. Prose carries `###`, so
+only a candidate line becomes an entry when its single `#` is deleted.
 
 The function-name sweep parses every test file of the repo, so it only runs for the
 ops the file names say nothing about.
@@ -792,8 +794,8 @@ def _md_text(ab_dir: Path, entries: List[Entry]) -> str:
         "main:add_rms_norm tests/test_add_rms_norm.py::test_add_rms_norm_accuracy",
         "```",
         "",
-        f"同一批候选的可编辑版本：`{MAP_NAME}`（全部注释掉；每行上面的 `#` 注释写着"
-        "匹配档位与依据，去掉一行的 `#` 即可用）。",
+        f"同一批候选的可编辑版本：`{MAP_NAME}`（说明行以 `###` 开头，候选行只带一个 `#`；"
+        "`###` 里写着匹配档位与依据，去掉候选行的 `#` 即可用，每个算子只留一行）。",
         "",
     ]
     if with_hints:
@@ -821,30 +823,35 @@ def _md_text(ab_dir: Path, entries: List[Entry]) -> str:
 
 
 def _map_text(ab_dir: Path, entries: List[Entry]) -> str:
+    """The draft, with two comment levels: `###` prose, `#` a candidate line.
+
+    Only a candidate line becomes a map entry by deleting its one `#`, so the prose
+    (headers, tier notes, the per-op banner) can never be enabled by accident -- and a
+    prose line one `#` short is still `##...`, still a comment to load_accuracy_map."""
     lines = [
-        f"# ab_run.py --accuracy-gate 自动生成：no_test 算子的候选测试（{ab_dir.name}，"
+        f"### ab_run.py --accuracy-gate 自动生成：no_test 算子的候选测试（{ab_dir.name}，"
         f"{datetime.now():%Y-%m-%d %H:%M}）",
-        "# 格式：<[repo:]op[@op_file]> <tests/...py[::test_func]>",
-        "# 全部注释掉了。确认哪一条对，去掉该行的 '#'；每个算子只留一行"
-        "（同一个算子映射两次会在启动时被拒）。",
-        "# 档位：[同名文件] 最可信；[文件名相近]/[文件名包含] 只是名字像；"
+        "### 说明行一律以 '###' 开头；候选行只带一个 '#'，去掉它这一行就生效（每个算子只留一行，"
+        "同一个算子映射两次会在启动时被拒）。",
+        "### 格式：<[repo:]op[@op_file]> <tests/...py[::test_func]>",
+        "### 档位：[同名文件] 最可信；[文件名相近]/[文件名包含] 只是名字像；"
         "[函数名命中] 只看函数名，文件可能与算子无关；[benchmark 名命中] 最弱，"
         "只按 benchmark 文件名命中函数名；·不确定 = 写在 if/try 里，或类是否被 pytest 收集无法确认。",
         "",
     ]
     if not entries:
-        lines += ["# 当前记录里没有 no_test 算子：这份清单是空的（旧内容已被替换）。", ""]
+        lines += ["### 当前记录里没有 no_test 算子：这份清单是空的（旧内容已被替换）。", ""]
         return "\n".join(lines)
     for e in entries:
         key = f"{e.repo}:{e.op}@{e.op_file}"
-        lines.append(f"# {key}  —  {e.bench or '?'}")
+        lines.append(f"### {key}  —  {e.bench or '?'}")
         if not e.hints:
-            lines += ["#   没有候选：tests/ 下没有名字相近的文件或用例", ""]
+            lines += ["###   没有候选：tests/ 下没有名字相近的文件或用例", ""]
             continue
         for h in e.hints[:MAX_MAP]:
-            lines += [f"# [{_tag(h)}] {h.why}", f"# {key} {h.target}"]
+            lines += [f"### [{_tag(h)}] {h.why}", f"# {key} {h.target}"]
         if len(e.hints) > MAX_MAP:
-            lines.append(f"# ... 另有 {len(e.hints) - MAX_MAP} 个候选，见 "
+            lines.append(f"### ... 另有 {len(e.hints) - MAX_MAP} 个候选，见 "
                          f"{MD_NAME}")
         lines.append("")
     return "\n".join(lines)
@@ -857,7 +864,8 @@ def main() -> None:
     p.add_argument("--out-md", type=Path, default=None,
                    help=f"report path (default <ab-dir>/{MD_NAME})")
     p.add_argument("--out-map", type=Path, default=None,
-                   help=f"commented --accuracy-map draft (default <ab-dir>/{MAP_NAME})")
+                   help=f"`###` prose / one-`#`-per-candidate --accuracy-map draft "
+                        f"(default <ab-dir>/{MAP_NAME})")
     args = p.parse_args()
 
     ab_dir = args.ab_dir.resolve()

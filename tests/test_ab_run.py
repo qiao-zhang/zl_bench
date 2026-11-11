@@ -94,6 +94,83 @@ def test_main_dispatches_the_sides_gpu_list(monkeypatch, tmp_path):
     assert seen["gpus"] == ["2", "3"]
 
 
+# ---------------- --start / --num ----------------
+
+def _window_args(tmp_path, text=None, **kw):
+    base = dict(all=False, ops=None, ops_file=None, start=1, num=0)
+    if text is not None:
+        ops_file = tmp_path / "ops.txt"
+        ops_file.write_text(text)
+        base["ops_file"] = ops_file
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+OPS_FILE = "# head\n\na\nb\n# tail\nc\nd\n"
+
+
+def test_op_window_is_one_based_and_counts_only_op_lines(tmp_path):
+    """The window counts the ops the file lists, not its lines: `# head` and the blank
+    line are not ops, so op 2 is `b`."""
+    args = _window_args(tmp_path, OPS_FILE, start=2, num=2)
+    ab_run.apply_op_window(args)
+    assert args.ops == ["b", "c"]
+    assert args.ops_file is None
+
+
+def test_op_window_runs_to_the_end_without_num(tmp_path):
+    args = _window_args(tmp_path, OPS_FILE, start=3)
+    ab_run.apply_op_window(args)
+    assert args.ops == ["c", "d"]
+
+
+def test_op_window_stops_at_the_end_and_says_so(tmp_path, capsys):
+    args = _window_args(tmp_path, OPS_FILE, start=3, num=10)
+    ab_run.apply_op_window(args)
+    assert args.ops == ["c", "d"]
+    out = capsys.readouterr().out
+    assert "past the end of the 4-op list" in out
+    assert "running ops 3..4, 2 of 10" in out
+
+
+def test_op_window_past_the_end_runs_nothing(tmp_path, capsys):
+    """Past the last op there is nothing left to run: one note, a clean exit, and no
+    A/B run for the ops in the middle of the file."""
+    args = _window_args(tmp_path, OPS_FILE, start=9, num=2)
+    with pytest.raises(SystemExit) as exc:
+        ab_run.apply_op_window(args)
+    assert exc.value.code == 0
+    assert "past the 4-op list: nothing to run" in capsys.readouterr().out
+
+
+def test_op_window_leaves_a_run_without_one_alone(tmp_path):
+    """Without --start/--num the selection reaches resolve_selection untouched."""
+    args = _window_args(tmp_path, OPS_FILE, ops=["x"])
+    ab_run.apply_op_window(args)
+    assert args.ops == ["x"]
+    assert args.ops_file is not None
+
+
+def test_op_window_windows_ops_and_ops_file_together(tmp_path):
+    args = _window_args(tmp_path, OPS_FILE, ops=["x", "y"], start=2, num=3)
+    ab_run.apply_op_window(args)
+    assert args.ops == ["y", "a", "b"]
+
+
+def test_op_window_refuses_all(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        ab_run.apply_op_window(_window_args(tmp_path, all=True, start=2))
+    assert "--all has no list" in str(exc.value)
+
+
+@pytest.mark.parametrize("kw, message", [({"start": 0}, "--start is 1-based"),
+                                         ({"num": -1}, "--num must not be negative")])
+def test_op_window_rejects_a_bad_number(tmp_path, kw, message):
+    with pytest.raises(SystemExit) as exc:
+        ab_run.apply_op_window(_window_args(tmp_path, OPS_FILE, **kw))
+    assert message in str(exc.value)
+
+
 # ---------------- accuracy gate ----------------
 
 def _checkout(tmp_path, label="main"):
