@@ -101,6 +101,26 @@ class Group(NamedTuple):
     rows: List[Row]
 
 
+def lift_csv_field_limit() -> None:
+    """Parse fields larger than the csv module's 128 KiB default.
+
+    `size_detail` names every input of a row, so an op with many/large tensors writes
+    a field far past that default and the parser stops with `field larger than field
+    limit`, not with a bad row. The cap is a parser default, not a limit the input
+    respects, so raise it to what this platform's C long holds (sys.maxsize overflows
+    on 32-bit builds)."""
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
+
+
+lift_csv_field_limit()
+
+
 def read_ab_csv(path: Path) -> List[Row]:
     out = []
     with path.open(newline="", encoding="utf-8-sig") as f:

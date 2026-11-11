@@ -527,6 +527,20 @@ def test_read_ab_csv_keeps_the_accuracy_cell(tmp_path):
     assert rlc_report.accuracy_failed(row)
 
 
+def test_read_ab_csv_parses_a_field_past_the_default_csv_limit(tmp_path):
+    """`size_detail` lists every input of a row, so a many-tensor op writes a cell far
+    past the csv module's 128 KiB default and the reader used to die on it with
+    `field larger than field limit` before a single row was reported."""
+    detail = "x" * (2 * 131072)
+    path = tmp_path / "rows.csv"
+    path.write_text(
+        "op,run,op_name,dtype,row,size_detail,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        f"main:kron@kron,main/kron,kron,torch.bfloat16,0,{detail},0.5,0.05,0.02,changed,,faster\n",
+        encoding="utf-8")
+    row = rlc_report.read_ab_csv(path)[0]
+    assert (row.gap, row.op_name) == (0.5, "kron")
+
+
 def test_main_reports_an_op_that_only_ran_float32(monkeypatch, tmp_path):
     """The CSV is the source of the op list: an op whose rows are all float32 still
     gets its table row (and its saving/cost), instead of the report coming back
