@@ -692,25 +692,21 @@ def load_sources(path: Optional[Path]) -> Dict[str, dict]:
     return out
 
 
-def display_name(label: str, op_names: Dict[str, int],
-                 sources: Optional[Dict[str, dict]] = None,
-                 op_files: Optional[Dict[Tuple[str, str], Set[str]]] = None) -> str:
-    """`repo:op@op_file` -> the table's row label, plus a second line when the
-    op needs distinguishing: `display · repo · multi/both` for a name that
-    expanded to several tests, or `repo:op@op_file` for same-named tests.
+def display_name(label: str, sources: Optional[Dict[str, dict]] = None) -> str:
+    """`repo:op@op_file` -> the full label, spelled the way the CSV and the gate dirs
+    spell it.
 
-    When one repo carries an op name in several benchmark files, the first line
-    carries `@op_file` too: the multi/both second line names the table row both
-    were expanded from, so without it the two rows would read the same."""
-    repo, _, rest = label.partition(":")
-    op, _, op_file = rest.partition("@")
-    ambiguous = len((op_files or {}).get((repo, op), ())) > 1
-    head = f"{op}@{op_file}" if ambiguous and op_file else op
+    The column used to carry the bare op name (`coalesce`) and only spelled the file
+    out when two rows would have read the same, which left a reader reconstructing the
+    benchmark file from a short name. The label itself is the name now; a multi/both
+    row keeps a second line naming the table row it was expanded from, as provenance
+    rather than as part of the name."""
     src = (sources or {}).get(label)
     if src and src.get("status") in ("multi", "both"):
-        shown = (src.get("display") or op).strip()
-        return f"{head}\n{shown} · {repo} · {src['status']}"
-    return f"{head}\n{label}" if op_names.get(op, 0) > 1 else head
+        repo, _, rest = label.partition(":")
+        shown = (src.get("display") or rest.partition("@")[0]).strip()
+        return f"{label}\n{shown} · {repo} · {src['status']}"
+    return label
 
 
 def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
@@ -743,7 +739,7 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
     heads = [(1, 1, "#"), (2, 2, "算子"), (3, 3, "关键")]
     subs: List[Tuple[int, int, str]] = []
     leaves = ["#", "算子", "关键"]
-    widths = [5, 26, 6]
+    widths = [5, 38, 6]
     col = 4
     for group, _ in DTYPE_GROUPS:
         heads.append((col, col + width(group) - 1, group))
@@ -878,14 +874,6 @@ def main() -> None:
     labels = sorted({r.label for r in rows})  # every op in the CSV, grouped or not
     order = read_table_order(args.table, labels)
     labels.sort(key=lambda label: (order.get(label, len(order)), label))
-    op_names = defaultdict(int)
-    op_files: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
-    for label in labels:
-        repo, _, rest = label.partition(":")
-        op, _, op_file = rest.partition("@")
-        op_names[op] += 1
-        op_files[(repo, op)].add(op_file)
-
     by_label: Dict[str, List[Row]] = defaultdict(list)
     for r in rows:
         by_label[r.label].append(r)
@@ -895,7 +883,7 @@ def main() -> None:
 
     out = []
     for label in labels:
-        out.append({"name": display_name(label, op_names, sources, op_files),
+        out.append({"name": display_name(label, sources),
                     "label": label,
                     "key": key_op(label, key_ops),
                     **op_entry(label, by_label[label], grouped[label], gate, args.gate,

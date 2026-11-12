@@ -656,7 +656,8 @@ def test_main_marks_the_key_ops_column(monkeypatch, tmp_path):
                                       "--key-ops", str(keys),
                                       "--out", str(tmp_path / "out.xlsx")])
     rlc_report.main()
-    assert {r["name"]: r["key"] for r in seen["rows"]} == {"kron": False, "mm": True}
+    assert {r["name"]: r["key"] for r in seen["rows"]} == \
+        {"main:kron@kron": False, "main:mm@mm": True}
 
 
 def test_op_entry_reports_the_original_latency_behind_the_cost():
@@ -702,8 +703,9 @@ def test_rows_sort_key_ops_first_then_by_original_latency(monkeypatch, tmp_path)
                                       "--key-ops", str(keys),
                                       "--out", str(tmp_path / "out.xlsx")])
     rlc_report.main()
-    assert [r["name"] for r in seen["rows"]] == ["key_large", "key_small",
-                                                 "large", "small"]
+    assert [r["name"] for r in seen["rows"]] == [
+        "main:key_large@key_large", "main:key_small@key_small",
+        "main:large@large", "main:small@small"]
     assert [round(r["cost_base"], 3) for r in seen["rows"]] == [5.0, 2.0, 8.0, 1.0]
 
 
@@ -915,41 +917,41 @@ def test_resolve_expands_all_tests_in_both_repos(monkeypatch, tmp_path):
     assert not errors
 
 
+def test_display_name_is_the_full_label():
+    """The 算子 column spells the label the way the CSV and the gate dirs do
+    (`repo:op@op_file`); a bare op name would leave the reader guessing the file."""
+    assert rlc_report.display_name("main:coalesce@coalesce") == "main:coalesce@coalesce"
+    assert rlc_report.display_name("main:kron@kron") == "main:kron@kron"
+    assert rlc_report.display_name("vllm:foo") == "vllm:foo"    # no op_file in the label
+    assert rlc_report.display_name("main:kron@kron", {}) == "main:kron@kron"
+
+
 def test_display_name_marks_multi_and_both(tmp_path):
+    """A multi/both row keeps its provenance line, under the full label."""
     sources = {
         "main:fused_moe_fp8@fused_moe_fp8": {"display": "fused_experts_impl",
                                              "status": "multi"},
         "vllm:outer@outer": {"display": "outer", "status": "both"},
     }
-    assert rlc_report.display_name("main:fused_moe_fp8@fused_moe_fp8", {}, sources) == \
-        "fused_moe_fp8\nfused_experts_impl · main · multi"
-    assert rlc_report.display_name("vllm:outer@outer", {}, sources) == \
-        "outer\nouter · vllm · both"
-    # without a source row the old same-name rule applies
-    assert rlc_report.display_name("main:outer@outer", {"outer": 2}, {}) == \
-        "outer\nmain:outer@outer"
-    assert rlc_report.display_name("main:kron@kron", {"kron": 1}, {}) == "kron"
+    assert rlc_report.display_name("main:fused_moe_fp8@fused_moe_fp8", sources) == \
+        "main:fused_moe_fp8@fused_moe_fp8\nfused_experts_impl · main · multi"
+    assert rlc_report.display_name("vllm:outer@outer", sources) == \
+        "vllm:outer@outer\nouter · vllm · both"
 
 
-def test_display_name_keeps_the_op_file_for_one_name_in_several_files():
-    """Two benchmark files with one op name (the `multi` case) must stay apart:
-    the second line names the table row both were expanded from, so without the
-    op_file on the first line the two rows read exactly the same."""
+def test_display_name_keeps_two_same_named_tests_apart():
+    """Two benchmark files with one op name stay apart because the label carries the
+    file, not because a rule kicks in only when they collide."""
     sources = {
         "main:perf_router_gemm@blas_perf_parallel": {"display": "router_gemm",
                                                      "status": "multi"},
         "main:perf_router_gemm@router_gemm": {"display": "router_gemm", "status": "multi"},
     }
-    op_files = {("main", "perf_router_gemm"): {"blas_perf_parallel", "router_gemm"}}
-    a = rlc_report.display_name("main:perf_router_gemm@blas_perf_parallel", {}, sources, op_files)
-    b = rlc_report.display_name("main:perf_router_gemm@router_gemm", {}, sources, op_files)
-    assert a == "perf_router_gemm@blas_perf_parallel\nrouter_gemm · main · multi"
-    assert b == "perf_router_gemm@router_gemm\nrouter_gemm · main · multi"
+    a = rlc_report.display_name("main:perf_router_gemm@blas_perf_parallel", sources)
+    b = rlc_report.display_name("main:perf_router_gemm@router_gemm", sources)
+    assert a == "main:perf_router_gemm@blas_perf_parallel\nrouter_gemm · main · multi"
+    assert b == "main:perf_router_gemm@router_gemm\nrouter_gemm · main · multi"
     assert a != b
-    # one file per op name keeps the plain first line
-    assert rlc_report.display_name("main:kron@kron", {}, {}, {("main", "kron"): {"kron"}}) == "kron"
-    assert rlc_report.display_name("main:kron@kron", {"kron": 2}, {},
-                                   {("main", "kron"): {"kron"}}) == "kron\nmain:kron@kron"
 
 
 def test_load_sources_reads_the_provenance_csv(tmp_path):
