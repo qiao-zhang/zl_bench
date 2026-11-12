@@ -11,7 +11,11 @@ ir_gate.py output for the layout-conversion counts:
 One row per op; columns grouped by dtype (bf16 / fp16 / float32 / fp8-complex64), each
 with the weakest and strongest gain, the lightest and heaviest regression and
 how many shapes they cover, plus the ttg.convert_layout count before -> after
-from the gate. The last columns are the largest absolute saving/cost and a note.
+from the gate and the verdict spread. The last columns are the largest absolute
+saving/cost, a note, and a `*` column counting how often `slower` appears in that
+row's other cells -- filter the sheet on "not 0" to keep only the ops some dtype
+called slower. A `关键` column right of the op name marks the ops listed in --key-ops
+as 1 and every other op as 0.
 
 Definitions (matching the hand-made table):
   gain    a result row whose gap > 0 (gap = median(A)/median(B) - 1, B faster)
@@ -20,12 +24,17 @@ Definitions (matching the hand-made table):
   lightest/heaviest   max/min loss among loss rows (heaviest = most negative)
   shape   rows showing a gain (or a loss) / every row of that op and dtype
   saving/cost         max(median(A) - median(B)) / max(median(B) - median(A))
+  original            median(A) of the row the cost came from -- what 多出 was measured
+                      against; empty when the op has no regression
   cvt     sum of ttg.convert_layout over the op's changed kernels, base -> new
   verdict how many rows ab_compare.py called same/faster/slower/undecided, out of every
           row of that op and dtype (N/M). A row whose gap only carries the sign of its
           noise -- `same` because p >= --clear -- still has a gain/loss figure above,
           so this column is what tells a real shift from a noisy sign: `same 4/5` with
           `退化 最重 -11.8%` is one small-shape row's jitter, not a regression.
+  key     1 when the op appears in --key-ops (the ops/key_ops_*.txt lists), else 0
+  slower  how many times `slower` appears in the row's other cells. The verdict cells
+          are the ones that carry it, so 0 means no dtype of the op was called slower.
 
 Rows kept out of the gain/loss and saving/cost figures — each with its own note giving
 the row count, and --include-unconfirmed counting them again:
@@ -48,6 +57,11 @@ it out, and a note whose rows only partly count says "其中 M 行未计入汇�
 
 A plain undecided row (no confirm) stays in the summaries: nothing was measured
 against it.
+
+Rows are ordered key ops first (those listed in --key-ops), then every other op. Inside
+each group the op whose 多出 was measured against the largest original latency comes
+first; the --table order only breaks ties, so a run without --key-ops still reads in
+table order.
 
 The table only orders and names the ops when --table is given; every op found in
 the CSV is still reported. Rows whose dtype has no column here (int8, int32,
@@ -82,6 +96,13 @@ COLUMNS = ("#", "算子", "bf16", "fp16", "float32", "fp8 / complex64",
 # The `判定` cell lists the verdicts in this order (ab_compare.py's wording), one
 # `name N/M` line per verdict that occurs.
 VERDICT_COLUMNS = ("same", "faster", "slower", "undecided")
+# Cells of a key-op list that are headers, not operator names (a CSV table can be
+# passed instead of the plain `ops/key_ops_*.txt` list).
+KEY_OPS_IGNORED = {"#", "算子", "op", "name", "序号"}
+# The verdict word the `*` column counts: ab_compare.py calls a row `slower` when the
+# gap survived both the threshold and the Mann-Whitney test, so 0 means every row of
+# the op was either same/undecided or only sign-noise.
+SLOWER = "slower"
 
 
 class Row(NamedTuple):
@@ -194,6 +215,37 @@ def load_notes(path: Optional[Path]) -> Dict[str, str]:
             if key and note:
                 out[key] = note
     return out
+
+
+def load_key_ops(path: Optional[Path]) -> Set[str]:
+    """Operator names listed in `path`, the way ops/key_ops_ppu.txt writes them.
+
+    One name per line (`main:mm@mm`), `#` comments and blank lines skipped; a line
+    with commas is split into cells, so a CSV table with a `算子` column works too.
+    A missing file (or no --key-ops) means no op is a key op."""
+    if not path or not path.is_file():
+        return set()
+    names = set()
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        for line in f:
+            text = "" if line.lstrip().startswith("#") else line.split("#", 1)[0]
+            for cell in text.split(","):
+                name = cell.strip()
+                if name and not name.isdigit() and name not in KEY_OPS_IGNORED:
+                    names.add(name)
+    return names
+
+
+def key_op(label: str, key_ops: Set[str]) -> bool:
+    """Whether `label` (`repo:op@op_file`) names an op in the key-op list.
+
+    The lists spell the label the way the reports do (`main:mm@mm`, `vllm:foo`), but a
+    bare op name is accepted too -- hand-edited lists usually drop the repo."""
+    if not key_ops:
+        return False
+    repo, _, rest = label.partition(":")
+    op, _, _ = rest.partition("@")
+    return bool({label, op, rest, f"{repo}:{op}"} & key_ops)
 
 
 _DO_BENCH_RE = re.compile(
@@ -595,8 +647,12 @@ def op_entry(label: str, rows: List[Row], groups: Dict[str, List[Row]],
              for group, rs in groups.items()}
     counted = [r for r in rows
                if not excluded(r, include_unconfirmed, include_accuracy_failed)]
-    saving = max((r.a_ms - r.b_ms for r in counted), default=0.0)
-    cost = max((r.b_ms - r.a_ms for r in counted), default=0.0)
+    # The largest change each way, plus the original latency behind the cost: "多出
+    # 0.02 ms" only reads as a regression next to what it was measured against.
+    saving_row = max(counted, key=lambda r: r.a_ms - r.b_ms, default=None)
+    cost_row = max(counted, key=lambda r: r.b_ms - r.a_ms, default=None)
+    saving = saving_row.a_ms - saving_row.b_ms if saving_row is not None else 0.0
+    cost = cost_row.b_ms - cost_row.a_ms if cost_row is not None else 0.0
     merged = row_notes(rows, reasons, notes, label,
                        include_unconfirmed=include_unconfirmed,
                        include_accuracy_failed=include_accuracy_failed)
@@ -612,7 +668,12 @@ def op_entry(label: str, rows: List[Row], groups: Dict[str, List[Row]],
                 merged.append(labelled)
     note = "；".join(text for text in dict.fromkeys(merged + [ungrouped_note(rows)]) if text)
     return {"label": label, "rows": len(rows), "groups": stats,
-            "saving": max(saving, 0.0), "cost": max(cost, 0.0), "note": note}
+            "saving": max(saving, 0.0), "cost": max(cost, 0.0),
+            # 原始: the A-side latency of the row the cost came from. An op that only
+            # got faster has no cost row, so the cell stays empty -- 0.0 would be a
+            # value, and it would sort as the smallest one.
+            "cost_base": cost_row.a_ms if cost_row is not None and cost > 0 else None,
+            "note": note}
 
 
 def load_sources(path: Optional[Path]) -> Dict[str, dict]:
@@ -679,11 +740,11 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
     def width(group: str) -> int:
         return 9 if typed(group) else 8
 
-    heads = [(1, 1, "#"), (2, 2, "算子")]
+    heads = [(1, 1, "#"), (2, 2, "算子"), (3, 3, "关键")]
     subs: List[Tuple[int, int, str]] = []
-    leaves = ["#", "算子"]
-    widths = [5, 26]
-    col = 3
+    leaves = ["#", "算子", "关键"]
+    widths = [5, 26, 6]
+    col = 4
     for group, _ in DTYPE_GROUPS:
         heads.append((col, col + width(group) - 1, group))
         if typed(group):
@@ -696,12 +757,15 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
         leaves += ["最弱", "最强", "shape", "最轻", "最重", "shape", "cvt", "判定"]
         widths += [9, 9, 7, 9, 9, 7, 7, 13]
         col += 8
-    heads += [(col, col + 1, "最大绝对变化"), (col + 2, col + 2, "备注")]
-    subs += [(col, col, "节省"), (col + 1, col + 1, "多出")]
-    leaves += ["节省", "多出", "备注"]
-    widths += [10, 10, 34]
+    heads += [(col, col + 2, "最大绝对变化"), (col + 3, col + 3, "备注"),
+              (col + 4, col + 4, "*")]
+    subs += [(col, col, "节省"), (col + 1, col + 1, "原始"), (col + 2, col + 2, "多出"),
+             (col + 4, col + 4, "*")]
+    leaves += ["节省", "原始", "多出", "备注", "*"]
+    widths += [10, 10, 10, 34, 8]
     ncols = len(widths)
-    note_col = ncols
+    # 备注 is no longer the last column: the `*` slower count sits right of it.
+    note_col = ncols - 1
 
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
     ws.cell(1, 1, title).font = Font(bold=True, size=14)
@@ -732,7 +796,7 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
             ws.cell(row, col).border = border
 
     for i, r in enumerate(rows, 1):
-        out = [i, r["name"]]
+        out = [i, r["name"], 1 if r["key"] else 0]
         for group, _ in DTYPE_GROUPS:
             g = r["groups"].get(group)
             if g is None:
@@ -749,7 +813,12 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
                     fmt_cvt(g["cvt"]),
                     fmt_verdict(g["verdicts"], g["rows"])]
         out += [fmt_time(r["saving"]) if r["saving"] else "—",
+                fmt_time(r["cost_base"]) if r.get("cost_base") else "—",
                 fmt_time(r["cost"]) if r["cost"] else "—", r["note"]]
+        # The `*` column: how often the cells to its left call a row slower. The verdict
+        # cells are the ones that carry the word; a manual note may mention it too, and
+        # counting those keeps the filter honest instead of silently dropping the cell.
+        out.append(sum(str(value).count(SLOWER) for value in out))
         for col, value in enumerate(out, 1):
             cell = ws.cell(6 + i, col, value)
             cell.border = border
@@ -777,6 +846,10 @@ def main() -> None:
     p.add_argument("--sources", type=Path, default=Path("ops/rlc_ops_sources.csv"),
                    help="rlc_ops.py provenance CSV, used to mark multi/both ops "
                         "(default %(default)s)")
+    p.add_argument("--key-ops", type=Path, default=None,
+                   help="operator list whose entries are key ops (ops/key_ops_*.txt: one "
+                        "name per line, # comments allowed); the table writes 1 in the "
+                        "关键 column for them and 0 for every other op")
     p.add_argument("--out", type=Path, default=Path("rlc_report.xlsx"))
     p.add_argument("--title", default="RLC Enhance 开启前后算子性能对比")
     p.add_argument("--env", default="", help="environment line under the title")
@@ -798,6 +871,7 @@ def main() -> None:
     gate = load_gate(args.gate)
     notes = load_notes(args.notes)
     sources = load_sources(args.sources)
+    key_ops = load_key_ops(args.key_ops)
     reasons = load_do_bench_reasons(args.ab_dir or args.csv.parent)
     kernels = load_run_kernels(args.ab_dir or args.csv.parent)
     groups = build_groups(rows)
@@ -822,10 +896,16 @@ def main() -> None:
     out = []
     for label in labels:
         out.append({"name": display_name(label, op_names, sources, op_files),
+                    "label": label,
+                    "key": key_op(label, key_ops),
                     **op_entry(label, by_label[label], grouped[label], gate, args.gate,
                                notes, reasons, kernels,
                                include_unconfirmed=args.include_unconfirmed,
                                include_accuracy_failed=args.include_accuracy_failed)})
+    # Key ops first, each group by the original latency behind its 多出 (largest first);
+    # the table order breaks ties, so a run without --key-ops still reads in table order.
+    out.sort(key=lambda r: (0 if r["key"] else 1, -(r["cost_base"] or 0.0),
+                            order.get(r["label"], len(order)), r["label"]))
 
     write_xlsx(args.out, out, args.title, args.env)
     print(f"{LOG} {len(out)} ops, {len(rows)} rows -> {args.out}", flush=True)

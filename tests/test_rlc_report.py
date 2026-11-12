@@ -612,12 +612,107 @@ def test_notes_are_automatic_and_manual(monkeypatch, tmp_path):
     assert "选到不同 autotune" in stats["note"]
 
 
+def test_key_ops_list_marks_the_key_operators(tmp_path):
+    """--key-ops reads the ops/key_ops_*.txt shape: one label per line, `#` comments
+    and blank lines skipped; a bare op name matches the label of any repo."""
+    path = tmp_path / "key_ops.txt"
+    path.write_text(
+        "# mm\nmain:mm@mm\n\n# blas\n"
+        "vllm:perf_w8a8_block_fp8_matmul@blas_perf_parallel\nflash_attn\n",
+        encoding="utf-8")
+    keys = rlc_report.load_key_ops(path)
+    assert keys == {"main:mm@mm", "vllm:perf_w8a8_block_fp8_matmul@blas_perf_parallel",
+                    "flash_attn"}
+    assert rlc_report.key_op("main:mm@mm", keys)
+    assert rlc_report.key_op("vllm:perf_w8a8_block_fp8_matmul@blas_perf_parallel", keys)
+    assert rlc_report.key_op("main:flash_attn@flash_attn", keys)
+    assert not rlc_report.key_op("main:kron@kron", keys)
+    assert not rlc_report.key_op("main:kron@kron", set())   # no list: nothing is key
+    assert rlc_report.load_key_ops(None) == set()
+    assert rlc_report.load_key_ops(tmp_path / "missing.txt") == set()
+
+
+def test_key_ops_list_accepts_a_table(tmp_path):
+    """A CSV table (`#,算子`) works as well: headers and row numbers are not op names."""
+    path = tmp_path / "key.csv"
+    path.write_text("#,算子\n1,main:mm@mm\n2,kron\n", encoding="utf-8")
+    assert rlc_report.load_key_ops(path) == {"main:mm@mm", "kron"}
+
+
+def test_main_marks_the_key_ops_column(monkeypatch, tmp_path):
+    """--key-ops reaches the table: the CSV's op label is matched against the list."""
+    csv_path = tmp_path / "rows.csv"
+    csv_path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        "main:kron@kron,main/kron,kron,torch.bfloat16,0,0.2,1.0,0.8,changed,,faster\n"
+        "main:mm@mm,main/mm,mm,torch.bfloat16,0,-0.2,1.0,1.2,changed,,slower\n",
+        encoding="utf-8")
+    keys = tmp_path / "key_ops.txt"
+    keys.write_text("# mm\nmain:mm@mm\n", encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(rlc_report, "write_xlsx",
+                        lambda path, rows, title, env: seen.update(rows=rows))
+    monkeypatch.setattr(sys, "argv", ["rlc_report.py", "--csv", str(csv_path),
+                                      "--key-ops", str(keys),
+                                      "--out", str(tmp_path / "out.xlsx")])
+    rlc_report.main()
+    assert {r["name"]: r["key"] for r in seen["rows"]} == {"kron": False, "mm": True}
+
+
+def test_op_entry_reports_the_original_latency_behind_the_cost():
+    """`原始` is the A-side latency of the row the largest 多出 came from, not the
+    op's slowest row."""
+    rows = [_row(a=1.0, b=1.3, gap=-0.3, row=0),     # 多出 0.3 measured on 1.0 ms
+            _row(a=4.0, b=4.1, gap=-0.025, row=1)]   # 多出 0.1 measured on 4.0 ms
+    entry = rlc_report.op_entry("main:kron@kron", rows, {}, {}, None, {}, {}, {})
+    assert entry["cost"] == pytest.approx(0.3)
+    assert entry["cost_base"] == pytest.approx(1.0)
+
+
+def test_op_entry_leaves_original_empty_without_a_regression():
+    """An op that only got faster has no 多出, so 原始 stays empty instead of 0.0."""
+    entry = rlc_report.op_entry("main:kron@kron",
+                                [_row(a=2.0, b=1.0, gap=1.0)], {}, {}, None, {}, {}, {})
+    assert entry["saving"] == pytest.approx(1.0)
+    assert entry["cost"] == 0.0
+    assert entry["cost_base"] is None
+
+
+def test_rows_sort_key_ops_first_then_by_original_latency(monkeypatch, tmp_path):
+    """Key ops first; inside each group the op whose 多出 was measured against the
+    largest original latency comes first."""
+    csv_path = tmp_path / "rows.csv"
+    csv_path.write_text(
+        "op,run,op_name,dtype,row,gap,median_a_ms,median_b_ms,gate,flags,verdict\n"
+        # not key: 8 ms and 1 ms
+        "main:large@large,main/large,large,torch.bfloat16,0,-0.06,8.0,8.5,changed,,slower\n"
+        "main:small@small,main/small,small,torch.bfloat16,0,-0.2,1.0,1.2,changed,,slower\n"
+        # key: 5 ms and 2 ms
+        "main:key_large@key_large,main/key_large,key_large,torch.bfloat16,0,-0.08,5.0,5.4,"
+        "changed,,slower\n"
+        "main:key_small@key_small,main/key_small,key_small,torch.bfloat16,0,-0.15,2.0,2.3,"
+        "changed,,slower\n",
+        encoding="utf-8")
+    keys = tmp_path / "key_ops.txt"
+    keys.write_text("main:key_large@key_large\nmain:key_small@key_small\n", encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(rlc_report, "write_xlsx",
+                        lambda path, rows, title, env: seen.update(rows=rows))
+    monkeypatch.setattr(sys, "argv", ["rlc_report.py", "--csv", str(csv_path),
+                                      "--key-ops", str(keys),
+                                      "--out", str(tmp_path / "out.xlsx")])
+    rlc_report.main()
+    assert [r["name"] for r in seen["rows"]] == ["key_large", "key_small",
+                                                 "large", "small"]
+    assert [round(r["cost_base"], 3) for r in seen["rows"]] == [5.0, 2.0, 8.0, 1.0]
+
+
 def test_xlsx_has_the_expected_groups(tmp_path):
     pytest.importorskip("openpyxl")
     from openpyxl import load_workbook
 
     path = tmp_path / "out.xlsx"
-    rows = [{"name": "kron", "label": "main:kron@kron", "rows": 3,
+    rows = [{"name": "kron", "label": "main:kron@kron", "key": 1, "rows": 3,
              "groups": {
                  "bf16": rlc_report.summarizing(
                      [_row(gap=1.5, row=0), _row(gap=-0.1, row=1)], {}, None, {},
@@ -625,29 +720,67 @@ def test_xlsx_has_the_expected_groups(tmp_path):
                  "float32": rlc_report.summarizing(
                      [_row(dtype="torch.float32", row=2, gap=-0.3, a=2.0, b=3.0)],
                      {}, None, {}, "main:kron@kron", "float32")},
-             "saving": 0.03, "cost": 0.001, "note": ""}]
+             "saving": 0.03, "cost": 0.001, "cost_base": 0.02, "note": ""}]
     rlc_report.write_xlsx(path, rows, "title", "env")
     ws = load_workbook(path).active
-    assert ws.max_column == 38
-    assert ws.cell(4, 3).value == "bf16"
-    assert ws.cell(4, 11).value == "fp16"
-    assert ws.cell(4, 19).value == "float32"
-    assert ws.cell(4, 27).value == "fp8 / complex64"
-    assert ws.cell(5, 27).value == "类型"
-    assert ws.cell(6, 3).value == "最弱"
-    assert ws.cell(6, 10).value == "判定"
-    assert ws.cell(6, 19).value == "最弱"
-    assert ws.cell(6, 26).value == "判定"
-    assert ws.cell(6, 38).value == "备注"
+    assert ws.max_column == 41
+    assert ws.cell(4, 4).value == "bf16"
+    assert ws.cell(4, 12).value == "fp16"
+    assert ws.cell(4, 20).value == "float32"
+    assert ws.cell(4, 28).value == "fp8 / complex64"
+    assert ws.cell(5, 28).value == "类型"
+    assert ws.cell(6, 4).value == "最弱"
+    assert ws.cell(6, 11).value == "判定"
+    assert ws.cell(6, 20).value == "最弱"
+    assert ws.cell(6, 27).value == "判定"
+    assert ws.cell(6, 38).value == "原始"
+    assert ws.cell(6, 40).value == "备注"
+    assert ws.cell(6, 41).value == "*"              # the slower-count column
     assert ws.cell(7, 2).value == "kron"
-    assert ws.cell(7, 3).value == "+150.0%"
-    assert ws.cell(7, 6).value == "-10.0%"
-    assert ws.cell(7, 10).value == "faster 2/2"   # bf16: both rows called faster
-    assert not ws.cell(7, 18).value               # fp16 group absent: cell empty
-    assert not ws.cell(7, 19).value               # float32 gain range: empty
-    assert ws.cell(7, 22).value == "-30.0%"        # float32 column, its own group
-    assert ws.cell(7, 26).value == "faster 1/1"
-    assert ws.cell(7, 36).value == "30 µs"
+    assert ws.cell(7, 3).value == 1                 # key op
+    assert ws.cell(7, 4).value == "+150.0%"
+    assert ws.cell(7, 7).value == "-10.0%"
+    assert ws.cell(7, 11).value == "faster 2/2"   # bf16: both rows called faster
+    assert not ws.cell(7, 19).value               # fp16 group absent: cell empty
+    assert not ws.cell(7, 20).value               # float32 gain range: empty
+    assert ws.cell(7, 23).value == "-30.0%"        # float32 column, its own group
+    assert ws.cell(7, 27).value == "faster 1/1"
+    assert ws.cell(7, 37).value == "30 µs"
+    assert ws.cell(7, 38).value == "20 µs"          # what the 1 µs cost was measured on
+    assert ws.cell(7, 39).value == "1.0 µs"
+    assert ws.cell(7, 41).value == 0                # nothing called slower
+
+
+def test_xlsx_marks_key_ops_and_counts_slower(tmp_path):
+    """`关键` is 1/0 from --key-ops, and the last `*` column counts how often the row
+    says `slower` -- 0 is the value the reader filters out."""
+    pytest.importorskip("openpyxl")
+    from openpyxl import load_workbook
+
+    def group(verdicts):
+        return rlc_report.summarizing(
+            [_row(verdict=v, row=i) for i, v in enumerate(verdicts)], {}, None, {},
+            "main:kron@kron", "bf16")
+
+    path = tmp_path / "out.xlsx"
+    rows = [{"name": "kron", "label": "main:kron@kron", "key": True,
+             "groups": {"bf16": group(["slower", "slower", "same"])},
+             "saving": 0.0, "cost": 0.002, "note": ""},
+            {"name": "mm", "label": "main:mm@mm", "key": False,
+             "groups": {"bf16": group(["same", "faster", "undecided"])},
+             "saving": 0.0, "cost": 0.0, "note": ""}]
+    rlc_report.write_xlsx(path, rows, "title", "env")
+    ws = load_workbook(path).active
+    assert (ws.cell(4, 41).value, ws.cell(5, 41).value, ws.cell(6, 41).value) == \
+        ("*", "*", "*")
+    assert ws.cell(7, 3).value == 1
+    assert ws.cell(8, 3).value == 0
+    assert ws.cell(7, 11).value == "same 1/3\nslower 2/3"
+    # The `*` cell counts the word: the verdict cell spells `slower` once (its 2/3 is
+    # the share of rows, not a repeat of the word), so a row is 1 no matter how many
+    # of its shapes were slower.
+    assert ws.cell(7, 41).value == 1
+    assert ws.cell(8, 41).value == 0                # same/faster/undecided only
 
 
 def _one_op_table(tmp_path, cell):
