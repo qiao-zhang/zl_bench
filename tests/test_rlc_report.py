@@ -89,6 +89,25 @@ def test_summarizing_splits_gain_and_loss_rows():
     assert stats["gain"] == (0.5, 1.5, 2)
     assert stats["loss"] == (-0.2, -0.2, 1)
     assert stats["cvt"] == (None, None, False)
+    assert stats["verdicts"] == {"faster": 3}
+
+
+def test_fmt_verdict_counts_each_verdict_out_of_every_row():
+    """`退化 最重 -11.8%` next to `same 4/5` must read as four rows the test called same:
+    the verdict and the shape counts share one denominator (every row of the op and
+    dtype), so a noisy sign is visible as such instead of looking like a regression."""
+    assert rlc_report.fmt_verdict({"same": 5}, 5) == "same 5/5"
+    assert rlc_report.fmt_verdict({"same": 3, "slower": 1}, 4) == "same 3/4\nslower 1/4"
+    assert rlc_report.fmt_verdict({"undecided": 2, "faster": 1}, 3) == \
+        "faster 1/3\nundecided 2/3"
+
+
+def test_fmt_verdict_reports_rows_whose_csv_has_no_verdict_column():
+    """A --csv from before the column existed has no verdict to count: say 未标注 rather
+    than folding those rows into `same` or leaving the cell empty."""
+    assert rlc_report.fmt_verdict({}, 4) == "未标注 4/4"
+    assert rlc_report.fmt_verdict({"same": 2}, 4) == "same 2/4\n未标注 2/4"
+    assert rlc_report.fmt_verdict({}, 0) == ""
 
 
 def test_read_ab_csv_carries_the_confirm_column(tmp_path):
@@ -609,21 +628,26 @@ def test_xlsx_has_the_expected_groups(tmp_path):
              "saving": 0.03, "cost": 0.001, "note": ""}]
     rlc_report.write_xlsx(path, rows, "title", "env")
     ws = load_workbook(path).active
-    assert ws.max_column == 34
+    assert ws.max_column == 38
     assert ws.cell(4, 3).value == "bf16"
-    assert ws.cell(4, 10).value == "fp16"
-    assert ws.cell(4, 17).value == "float32"
-    assert ws.cell(4, 24).value == "fp8 / complex64"
-    assert ws.cell(5, 24).value == "类型"
+    assert ws.cell(4, 11).value == "fp16"
+    assert ws.cell(4, 19).value == "float32"
+    assert ws.cell(4, 27).value == "fp8 / complex64"
+    assert ws.cell(5, 27).value == "类型"
     assert ws.cell(6, 3).value == "最弱"
-    assert ws.cell(6, 17).value == "最弱"
-    assert ws.cell(6, 34).value == "备注"
+    assert ws.cell(6, 10).value == "判定"
+    assert ws.cell(6, 19).value == "最弱"
+    assert ws.cell(6, 26).value == "判定"
+    assert ws.cell(6, 38).value == "备注"
     assert ws.cell(7, 2).value == "kron"
     assert ws.cell(7, 3).value == "+150.0%"
     assert ws.cell(7, 6).value == "-10.0%"
-    assert not ws.cell(7, 17).value           # float32 gain range: empty
-    assert ws.cell(7, 20).value == "-30.0%"    # float32 column, its own group
-    assert ws.cell(7, 32).value == "30 µs"
+    assert ws.cell(7, 10).value == "faster 2/2"   # bf16: both rows called faster
+    assert not ws.cell(7, 18).value               # fp16 group absent: cell empty
+    assert not ws.cell(7, 19).value               # float32 gain range: empty
+    assert ws.cell(7, 22).value == "-30.0%"        # float32 column, its own group
+    assert ws.cell(7, 26).value == "faster 1/1"
+    assert ws.cell(7, 36).value == "30 µs"
 
 
 def _one_op_table(tmp_path, cell):

@@ -21,6 +21,11 @@ Definitions (matching the hand-made table):
   shape   rows showing a gain (or a loss) / every row of that op and dtype
   saving/cost         max(median(A) - median(B)) / max(median(B) - median(A))
   cvt     sum of ttg.convert_layout over the op's changed kernels, base -> new
+  verdict how many rows ab_compare.py called same/faster/slower/undecided, out of every
+          row of that op and dtype (N/M). A row whose gap only carries the sign of its
+          noise -- `same` because p >= --clear -- still has a gain/loss figure above,
+          so this column is what tells a real shift from a noisy sign: `same 4/5` with
+          `退化 最重 -11.8%` is one small-shape row's jitter, not a regression.
 
 Rows kept out of the gain/loss and saving/cost figures — each with its own note giving
 the row count, and --include-unconfirmed counting them again:
@@ -74,6 +79,9 @@ DTYPE_GROUPS = (
 TYPED_GROUPS = ("fp8 / complex64",)
 COLUMNS = ("#", "算子", "bf16", "fp16", "float32", "fp8 / complex64",
            "最大绝对变化", "备注")
+# The `判定` cell lists the verdicts in this order (ab_compare.py's wording), one
+# `name N/M` line per verdict that occurs.
+VERDICT_COLUMNS = ("same", "faster", "slower", "undecided")
 
 
 class Row(NamedTuple):
@@ -305,6 +313,21 @@ def fmt_cvt(pair) -> str:
     return f"{'?' if before is None else before}→{after}"
 
 
+def fmt_verdict(counts: Dict[str, int], total: int) -> str:
+    """`same 5/5`, or one `name N/M` line per verdict that occurs.
+
+    M is every row of the op and dtype, so the cell says which share of the rows each
+    verdict covers. A CSV written before ab_compare.py had a `verdict` column carries
+    none, and those rows are reported as 未标注 rather than folded into `same`."""
+    if not total:
+        return ""
+    parts = [f"{name} {counts[name]}/{total}" for name in VERDICT_COLUMNS if counts.get(name)]
+    unmarked = total - sum(counts.get(name, 0) for name in VERDICT_COLUMNS)
+    if unmarked or not parts:
+        parts.append(f"未标注 {unmarked}/{total}")
+    return "\n".join(parts)
+
+
 def fp8_type(dtypes: List[str]) -> str:
     return "complex64" if any("complex" in d for d in dtypes) else "fp8"
 
@@ -513,6 +536,11 @@ def summarizing(rows: List[Row], gate: Dict[Tuple[str, str, str, int], List[str]
                  max((r.gap for r in gains), default=None), len(gains)),
         "loss": (max((r.gap for r in losses), default=None),
                  min((r.gap for r in losses), default=None), len(losses)),
+        # verdict -> rows, over every row of the group (not just `counted`): the table
+        # shows the spread next to gain/loss, so M has to be the same denominator as
+        # the shape counts. An empty verdict (a CSV from before the column existed) is
+        # left out here and reported as 未标注 by fmt_verdict.
+        "verdicts": dict(Counter(r.verdict for r in rows if r.verdict)),
         "cvt": (cvt_before, cvt_after, unchanged),
         "note": "；".join(note),
     }
@@ -649,7 +677,7 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
         return group in TYPED_GROUPS
 
     def width(group: str) -> int:
-        return 8 if typed(group) else 7
+        return 9 if typed(group) else 8
 
     heads = [(1, 1, "#"), (2, 2, "算子")]
     subs: List[Tuple[int, int, str]] = []
@@ -663,10 +691,11 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
             leaves.append("类型")
             widths.append(16)
             col += 1
-        subs += [(col, col + 2, "收益"), (col + 3, col + 5, "退化"), (col + 6, col + 6, "cvt")]
-        leaves += ["最弱", "最强", "shape", "最轻", "最重", "shape", "cvt"]
-        widths += [9, 9, 7, 9, 9, 7, 7]
-        col += 7
+        subs += [(col, col + 2, "收益"), (col + 3, col + 5, "退化"),
+                 (col + 6, col + 6, "cvt"), (col + 7, col + 7, "判定")]
+        leaves += ["最弱", "最强", "shape", "最轻", "最重", "shape", "cvt", "判定"]
+        widths += [9, 9, 7, 9, 9, 7, 7, 13]
+        col += 8
     heads += [(col, col + 1, "最大绝对变化"), (col + 2, col + 2, "备注")]
     subs += [(col, col, "节省"), (col + 1, col + 1, "多出")]
     leaves += ["节省", "多出", "备注"]
@@ -717,7 +746,8 @@ def write_xlsx(path: Path, rows: List[dict], title: str, env: str) -> None:
                     fmt_pct(g["loss"][0]) if g["loss"][0] is not None else "",
                     fmt_pct(g["loss"][1]) if g["loss"][1] is not None else "",
                     f"{g['loss'][2]}/{g['rows']}",
-                    fmt_cvt(g["cvt"])]
+                    fmt_cvt(g["cvt"]),
+                    fmt_verdict(g["verdicts"], g["rows"])]
         out += [fmt_time(r["saving"]) if r["saving"] else "—",
                 fmt_time(r["cost"]) if r["cost"] else "—", r["note"]]
         for col, value in enumerate(out, 1):
